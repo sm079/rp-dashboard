@@ -68,8 +68,8 @@ while :; do
   sleep 3
 done
 EOF
-chmod +x "$RAM/run-comfyui.sh"
-setsid nohup "$RAM/run-comfyui.sh" > "$RAM/comfyui.log" 2>&1 < /dev/null &
+# /dev/shm is mounted noexec, so run the script through bash.
+setsid nohup bash "$RAM/run-comfyui.sh" > "$RAM/comfyui.log" 2>&1 < /dev/null &
 echo $! > "$SUPERVISOR_PID"
 
 echo -n "Starting ComfyUI"
@@ -84,7 +84,9 @@ for i in $(seq 180); do
   echo -n "."; sleep 1
 done
 
-limit="$(cat /sys/fs/cgroup/memory.max 2>/dev/null || echo unknown)"
+# cgroup v2, then v1.
+limit="$(cat /sys/fs/cgroup/memory.max 2>/dev/null \
+  || cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo unknown)"
 case "$limit" in
   ''|*[!0-9]*) echo "Container RAM limit: $limit" ;;
   *) echo "Container RAM limit: $(( limit / 1024 / 1024 / 1024 )) GB" ;;
