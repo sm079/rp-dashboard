@@ -12,8 +12,8 @@
     }
   },
   "h3": {
-    "description": "MiniMax H3 reference-to-video (pruned int8), NVFP4 text encoder, video+audio VAEs, 4-step turbo LoRA",
-    "size_gb": 41.4,
+    "description": "MiniMax H3 reference-to-video (pruned int8), NVFP4 text encoder, video+audio VAEs, official ref2v 4-step turbo LoRA, community turbo v4 EMA LoRA (pruned)",
+    "size_gb": 42.0,
     "files": {
       "Comfy-Org/MiniMax-H3": [
         "diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors",
@@ -21,7 +21,11 @@
         "vae/minimax_h3_video_vae_fp16.safetensors",
         "vae/minimax_h3_audio_vae_fp32.safetensors",
         "loras/minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors"
-      ]
+      ],
+      "drbaph/MiniMax-H3-Turbo-Lora-ComfyUI": {
+        "into": "loras",
+        "files": ["minimax_h3_turbo_v4_step600_ema_pruned_comfyui.safetensors"]
+      }
     }
   }
 }

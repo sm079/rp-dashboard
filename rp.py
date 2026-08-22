@@ -189,10 +189,13 @@ def download_models(pod, names):
     unknown = [n for n in names if n not in catalog]
     if unknown:
         sys.exit(f"Unknown model sets: {unknown}. Known: {list(catalog)}")
+    # A repo maps to a list of paths (repo mirrors ComfyUI's models/ layout) or
+    # to {"into": "<models subfolder>", "files": [...]} for repos that don't.
     specs = []
     for name in names:
-        for repo, files in catalog[name]["files"].items():
-            specs.append(repo + "::" + ",".join(files))
+        for repo, entry in catalog[name]["files"].items():
+            into, files = ("", entry) if isinstance(entry, list) else (entry["into"], entry["files"])
+            specs.append(f"{repo}::{into}::{','.join(files)}")
     total = sum(catalog[n].get("size_gb", 0) for n in names)
     print(f"Downloading {', '.join(names)} (~{total:.0f} GB) on the pod")
     return ssh_script(pod, ROOT / "remote" / "models.sh", *specs)
