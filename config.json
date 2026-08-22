@@ -8,5 +8,6 @@
   "local_port": 8188,
   "outputs_dir": "outputs",
   "workflows_dir": "workflows",
+  "settings_dir": "settings",
   "default_models": ["krea2", "h3"]
 }

@@ -166,14 +166,14 @@ def cmd_up(args):
 
 
 def run_setup(pod):
-    from sync import push_workflows
+    from sync import push_saved
     print("Running remote setup (RAM-only ComfyUI folders, localhost only)...")
     rc = ssh_script(pod, ROOT / "remote" / "setup.sh")
     if rc != 0:
         sys.exit(f"Remote setup failed (exit {rc})")
-    n = push_workflows(pod, ssh_base, ROOT / CONFIG.get("workflows_dir", "workflows"))
-    if n:
-        print(f"Uploaded {n} saved workflow(s)")
+    counts = push_saved(pod, ssh_base, CONFIG, ROOT)
+    if counts:
+        print(f"Restored {counts.get('w', 0)} workflow(s) and {counts.get('s', 0)} settings file(s)")
 
 
 def cmd_setup(args):

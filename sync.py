@@ -1,9 +1,10 @@
-"""SSH tunnel to ComfyUI plus copying outputs and saved workflows home.
+"""SSH tunnel to ComfyUI plus copying outputs, workflows and settings home.
 
 - Outputs land in <outputs_dir>/<YYYY-MM-DD>/<path inside ComfyUI's output dir>,
   dated by the local day they were copied. Existing files are never overwritten.
-- Saved workflows are mirrored to <workflows_dir>/ (latest version wins) and
-  pushed back to the pod by `rp.py up` / `rp.py setup`.
+- Saved workflows are mirrored to <workflows_dir>/ and ComfyUI settings
+  (comfy.settings.json, keybindings) to <settings_dir>/, latest version wins.
+  Both are pushed back to the pod by `rp.py up` / `rp.py setup`.
 """
 import datetime
 import io
@@ -17,15 +18,29 @@ import time
 from pathlib import Path, PurePosixPath
 
 RAM = "/dev/shm/comfy"
-REMOTE_DIRS = {"o": f"{RAM}/output", "w": f"{RAM}/user/default/workflows"}
+# kind -> (remote dir, extra find args, config key for the local dir, default)
+KINDS = {
+    "o": (f"{RAM}/output", "", "outputs_dir", "outputs"),
+    "w": (f"{RAM}/user/default/workflows", "", "workflows_dir", "workflows"),
+    # Top-level files only: comfy.settings.json, comfy.keybindings.json, ...
+    "s": (f"{RAM}/user/default", "-maxdepth 1", "settings_dir", "settings"),
+}
+# Mirrored kinds that are uploaded again on setup.
+RESTORED = ("w", "s")
 POLL_SECONDS = 3
 END_MARK = "__END_OF_LISTING__"
 UNSAFE = re.compile(r'[<>:"\\|?*\x00-\x1f]')
 
 # Prints "<kind>\t<relpath>\t<size>\t<mtime>" for each file, then END_MARK.
 LIST_CMD = " ".join(
-    f"find -L {d} -type f -printf '{k}\\t%P\\t%s\\t%T@\\n' 2>/dev/null;" for k, d in REMOTE_DIRS.items()
+    f"find -L {d} {opts} -type f -printf '{k}\\t%P\\t%s\\t%T@\\n' 2>/dev/null;"
+    for k, (d, opts, _, _) in KINDS.items()
 ) + f" echo {END_MARK};"
+
+
+def local_root(kind, config, root):
+    _, _, key, default = KINDS[kind]
+    return (Path(root) / config.get(key, default)).resolve()
 # Runs on the pod for the lifetime of the connection.
 WATCH_CMD = f"while :; do {LIST_CMD} sleep {POLL_SECONDS}; done"
 
@@ -39,7 +54,7 @@ def parse_listing(lines):
             continue
         kind, rel, size, mtime = parts
         name = PurePosixPath(rel).name
-        if kind not in REMOTE_DIRS or name.startswith(".") or name.endswith((".tmp", ".part")):
+        if kind not in KINDS or name.startswith(".") or name.endswith((".tmp", ".part")):
             continue
         files[(kind, rel)] = (int(size), mtime)
     return files
@@ -78,30 +93,40 @@ def fetch(pod, ssh_base, remote_dir, rels, target):
                     f.write(chunk)
             tmp.replace(dest)
             written.append((member.name, dest))
+    # tarfile stops at the end-of-archive marker; drain tar's block padding or
+    # ssh blocks writing it into a full pipe and never exits.
+    proc.stdout.read()
     proc.wait()
     return written
 
 
-def push_workflows(pod, ssh_base, wf_root):
-    """Upload local saved workflows into the pod's RAM user dir."""
-    files = [p for p in Path(wf_root).rglob("*.json")] if Path(wf_root).is_dir() else []
-    if not files:
-        return 0
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w") as tar:
-        for p in files:
-            tar.add(p, arcname=p.relative_to(wf_root).as_posix())
-    remote = REMOTE_DIRS["w"]
-    cmd = ssh_base(pod, "-o", "BatchMode=yes") + [f"mkdir -p '{remote}' && tar -C '{remote}' -xf -"]
-    subprocess.run(cmd, input=buf.getvalue(), check=True)
-    return len(files)
+def push_saved(pod, ssh_base, config, root):
+    """Upload local saved workflows and settings into the pod's RAM user dir.
+
+    Returns {kind: number of files uploaded}.
+    """
+    counts = {}
+    for kind in RESTORED:
+        local = local_root(kind, config, root)
+        files = [p for p in local.rglob("*") if p.is_file()] if local.is_dir() else []
+        if not files:
+            continue
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tar:
+            for p in files:
+                tar.add(p, arcname=p.relative_to(local).as_posix())
+        remote = KINDS[kind][0]
+        cmd = ssh_base(pod, "-o", "BatchMode=yes") + [f"mkdir -p '{remote}' && tar -C '{remote}' -xf -"]
+        subprocess.run(cmd, input=buf.getvalue(), check=True)
+        counts[kind] = len(files)
+    return counts
 
 
 class Syncer:
     def __init__(self, pod, config, ssh_base, root):
         self.pod, self.ssh_base = pod, ssh_base
-        self.out_root = (root / config.get("outputs_dir", "outputs")).resolve()
-        self.wf_root = (root / config.get("workflows_dir", "workflows")).resolve()
+        self.roots = {kind: local_root(kind, config, root) for kind in KINDS}
+        self.out_root = self.roots["o"]
         self.state_file = root / ".state" / "synced.json"
         try:
             self.synced = set(json.loads(self.state_file.read_text()).get(pod["id"], []))
@@ -113,18 +138,19 @@ class Syncer:
         self.state_file.write_text(json.dumps({self.pod["id"]: sorted(self.synced)}))
 
     def copy(self, keys, files):
-        for kind in REMOTE_DIRS:
+        for kind in KINDS:
             rels = [rel for k, rel in keys if k == kind]
             if not rels:
                 continue
+            local = self.roots[kind]
             if kind == "o":
-                target = lambda rel: output_target(self.out_root, rel)
+                target = lambda rel: output_target(local, rel)
             else:
-                target = lambda rel: Path(self.wf_root, *safe_parts(rel))
-            for rel, dest in fetch(self.pod, self.ssh_base, REMOTE_DIRS[kind], rels, target):
+                target = lambda rel: Path(local, *safe_parts(rel))
+            for rel, dest in fetch(self.pod, self.ssh_base, KINDS[kind][0], rels, target):
                 size, mtime = files[(kind, rel)]
                 self.synced.add(f"{kind}|{rel}|{size}|{mtime}")
-                base = self.out_root if kind == "o" else self.wf_root.parent
+                base = local if kind == "o" else local.parent
                 print(f"  saved {dest.relative_to(base)}", flush=True)
         self.save_state()
 
@@ -160,7 +186,8 @@ def run_connect(pod, config, ssh_base, root):
     session, listings = start_session(pod, ssh_base, local_port)
     print(f"ComfyUI:   http://localhost:{local_port}")
     print(f"Outputs:   {syncer.out_root}\\<date>\\")
-    print(f"Workflows: {syncer.wf_root}\\")
+    print(f"Workflows: {syncer.roots['w']}\\")
+    print(f"Settings:  {syncer.roots['s']}\\")
     print("Ctrl+C to stop syncing; the pod keeps running.", flush=True)
     seen = {}
     try:

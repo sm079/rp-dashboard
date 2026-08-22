@@ -8,8 +8,10 @@ inputs, outputs and workflows synced to a local folder.
 - ComfyUI is restarted to listen on `127.0.0.1` and to keep its input, output,
   temp and user (workflows/settings) folders in RAM (`/dev/shm`).
 - `connect` opens an SSH tunnel to `http://localhost:8188` and copies each
-  finished output to `outputs/<YYYY-MM-DD>/`, and each saved workflow to
-  `workflows/`. Saved workflows are uploaded again on the next `up`.
+  finished output to `outputs/<YYYY-MM-DD>/`, each saved workflow to
+  `workflows/`, and ComfyUI's settings to `settings/`. Workflows and settings
+  are restored on the next `up`.
+- Nothing persists on RunPod: models are re-downloaded on each `up`.
 
 ## Requirements
 

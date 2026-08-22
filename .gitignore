@@ -2,6 +2,7 @@
 .state/
 outputs/
 workflows/
+settings/
 
 # Secrets
 .env
