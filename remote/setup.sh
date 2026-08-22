@@ -32,7 +32,7 @@ fi
   echo "--output-directory $RAM/output"
   echo "--temp-directory $RAM/temp"
   echo "--user-directory $RAM/user"
-  echo "--preview-method taesd"
+  echo "--preview-method auto"
   for arg in "$@"; do echo "$arg"; done
 } > "$ARGS_FILE"
 
