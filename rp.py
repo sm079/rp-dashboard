@@ -56,7 +56,7 @@ def api_key():
     return key
 
 
-def api(method, path, body=None):
+def api(method, path, body=None, exit_on_error=True):
     req = urllib.request.Request(
         REST + path,
         method=method,
@@ -69,7 +69,10 @@ def api(method, path, body=None):
         with urllib.request.urlopen(req, timeout=60) as resp:
             raw = resp.read()
     except urllib.error.HTTPError as e:
-        sys.exit(f"RunPod API {method} {path} failed: {e.code} {e.read().decode(errors='replace')}")
+        e.detail = e.read().decode(errors="replace")
+        if not exit_on_error:
+            raise
+        sys.exit(f"RunPod API {method} {path} failed: {e.code} {e.detail}")
     return json.loads(raw) if raw else None
 
 
@@ -128,31 +131,28 @@ def wait_for_ssh(pod_id, timeout=900):
             if probe.returncode == 0:
                 return pod
         time.sleep(5)
-    sys.exit(f"Pod {pod_id} did not become reachable over SSH within {timeout}s")
+    return None
 
 
 def cmd_up(args):
     existing = load_json(POD_FILE)
     if existing:
         sys.exit(f"A pod is already recorded ({existing['id']}). Use `status`, or `down` first.")
-    body = {
-        "name": CONFIG["pod_name"],
-        "templateId": CONFIG["template_id"],
-        "gpuTypeIds": [args.gpu or CONFIG["gpu_type"]],
-        "gpuCount": 1,
-        "cloudType": CONFIG["cloud_type"],
-        "containerDiskInGb": CONFIG["container_disk_gb"],
-        "volumeInGb": 0,
-        # SSH only: no public proxy URLs for ComfyUI, Jupyter or the file browser.
-        "ports": ["22/tcp"],
-        "supportPublicIp": True,
-    }
-    print(f"Launching {body['gpuTypeIds'][0]} ({body['cloudType']}) from template {body['templateId']}")
-    created = api("POST", "/pods", body)
-    pod_id = created["id"]
-    print(f"Pod {pod_id} created, ${created.get('costPerHr', '?')}/hr. Waiting for SSH...")
-    save_json(POD_FILE, {"id": pod_id})
-    pod = wait_for_ssh(pod_id)
+    attempts = CONFIG.get("launch_attempts", 3)
+    timeout = CONFIG.get("launch_timeout_s", 240)
+    for attempt in range(1, attempts + 1):
+        pod = launch(args, timeout)
+        if pod:
+            break
+        # A pod with no SSH after the timeout is usually stuck pulling the image
+        # on an uncached host; it bills meanwhile, so replace it.
+        stuck = load_json(POD_FILE)
+        api("DELETE", f"/pods/{stuck['id']}")
+        POD_FILE.unlink(missing_ok=True)
+        print(f"Pod {stuck['id']} had no SSH after {timeout}s; terminated it "
+              f"(attempt {attempt}/{attempts}).", flush=True)
+    else:
+        sys.exit("Could not get a reachable pod. Try again later or another GPU type (--gpu).")
     save_json(POD_FILE, pod)
     print(f"SSH ready: root@{pod['ip']} -p {pod['ssh_port']}")
     if args.no_setup:
@@ -165,6 +165,42 @@ def cmd_up(args):
     print("Ready. Next: python rp.py connect")
 
 
+def launch(args, timeout):
+    """Create a pod and wait for SSH. Returns the pod, or None if it never came up."""
+    body = {
+        "name": CONFIG["pod_name"],
+        "templateId": CONFIG["template_id"],
+        "gpuTypeIds": [args.gpu or CONFIG["gpu_type"]],
+        "gpuCount": 1,
+        "cloudType": CONFIG["cloud_type"],
+        "containerDiskInGb": CONFIG["container_disk_gb"],
+        "volumeInGb": 0,
+        # Large video models are staged in pinned RAM; too little gets ComfyUI OOM-killed.
+        "minRAMPerGPU": args.min_ram or CONFIG.get("min_ram_gb", 0),
+        # SSH only: no public proxy URLs for ComfyUI, Jupyter or the file browser.
+        "ports": ["22/tcp"],
+        "supportPublicIp": True,
+    }
+    print(f"Launching {body['gpuTypeIds'][0]} ({body['cloudType']}) from template {body['templateId']}")
+    wait_s = CONFIG.get("capacity_wait_s", 600)
+    start = time.time()
+    while True:
+        try:
+            created = api("POST", "/pods", body, exit_on_error=False)
+            break
+        except urllib.error.HTTPError as e:
+            detail = getattr(e, "detail", "")
+            if "no instances currently available" not in detail or time.time() - start > wait_s:
+                sys.exit(f"RunPod API POST /pods failed: {e.code} {detail}")
+            print(f"  no {body['gpuTypeIds'][0]} available yet; retrying "
+                  f"({int(time.time() - start)}s of {wait_s}s)", flush=True)
+            time.sleep(30)
+    pod_id = created["id"]
+    print(f"Pod {pod_id} created, ${created.get('costPerHr', '?')}/hr. Waiting for SSH...", flush=True)
+    save_json(POD_FILE, {"id": pod_id})
+    return wait_for_ssh(pod_id, timeout)
+
+
 def run_setup(pod):
     from sync import push_saved
     if CONFIG.get("comfyui_version"):
@@ -174,7 +210,7 @@ def run_setup(pod):
         if rc != 0:
             sys.exit(f"ComfyUI update failed (exit {rc})")
     print("Running remote setup (RAM-only ComfyUI folders, localhost only)...")
-    rc = ssh_script(pod, ROOT / "remote" / "setup.sh")
+    rc = ssh_script(pod, ROOT / "remote" / "setup.sh", *CONFIG.get("comfyui_args", []))
     if rc != 0:
         sys.exit(f"Remote setup failed (exit {rc})")
     counts = push_saved(pod, ssh_base, CONFIG, ROOT)
@@ -255,6 +291,7 @@ def main():
     sub = p.add_subparsers(dest="cmd", required=True)
     up = sub.add_parser("up", help="launch a pod")
     up.add_argument("--gpu", help="override the GPU type id from config.json")
+    up.add_argument("--min-ram", type=int, help="override min_ram_gb from config.json")
     up.add_argument("--no-setup", action="store_true", help="only launch; skip setup and models")
     up.add_argument("--no-models", action="store_true", help="skip downloading default models")
     up.set_defaults(func=cmd_up)

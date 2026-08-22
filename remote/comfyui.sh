@@ -9,7 +9,10 @@ REF="$1"; shift
 
 cd "$COMFY_DIR"
 # shellcheck source=/dev/null
-source .venv-cu128/bin/activate
+# The venv name follows the template's CUDA version (.venv-cu128, .venv-cu130, ...).
+VENV="$(ls -d .venv-cu* 2>/dev/null | grep -v '\.bak' | sort | tail -1)"
+[ -n "$VENV" ] || { echo "No ComfyUI venv found in $COMFY_DIR" >&2; exit 1; }
+source "$VENV/bin/activate"
 
 current="$(git describe --tags --exact-match 2>/dev/null || git rev-parse --short HEAD)"
 if [ "$current" != "$REF" ]; then

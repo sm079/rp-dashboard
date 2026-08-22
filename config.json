@@ -3,14 +3,23 @@
   "gpu_type": "NVIDIA GeForce RTX 5090",
   "cloud_type": "SECURE",
   "container_disk_gb": 150,
+  "min_ram_gb": 0,
+  "launch_timeout_s": 240,
+  "launch_attempts": 3,
   "pod_name": "comfyui",
   "ssh_key": "~/.ssh/id_ed25519",
   "local_port": 8188,
   "outputs_dir": "outputs",
   "workflows_dir": "workflows",
   "settings_dir": "settings",
-  "default_models": ["krea2", "h3"],
+  "default_models": [
+    "krea2",
+    "h3"
+  ],
   "comfyui_version": "v0.39.1",
+  "comfyui_args": [
+    "--fast-disk"
+  ],
   "custom_nodes": [
     "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite"
   ]
