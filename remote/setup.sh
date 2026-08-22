@@ -13,7 +13,7 @@ PORT=8188
 [ -d "$COMFY_DIR" ] || { echo "ComfyUI not found at $COMFY_DIR" >&2; exit 1; }
 echo "$COMFY_DIR" > /root/.comfyui_dir
 
-mkdir -p "$RAM"/{input,output,temp,user}
+mkdir -p "$RAM"/{input,output,temp,user,tmp}
 chmod 700 "$RAM"
 # Seed the RAM user dir with the template's default settings (no user data yet).
 if [ -d "$COMFY_DIR/user" ] && [ -z "$(ls -A "$RAM/user")" ]; then
@@ -29,6 +29,7 @@ cat > "$ARGS_FILE" <<EOF
 --output-directory $RAM/output
 --temp-directory $RAM/temp
 --user-directory $RAM/user
+--preview-method auto
 EOF
 
 # Services the SSH-only setup doesn't use.
@@ -43,6 +44,8 @@ fi
 cd "$COMFY_DIR"
 # shellcheck source=/dev/null
 source .venv-cu128/bin/activate
+# Scratch files from Python's tempfile, ffmpeg and custom nodes go to RAM too.
+export TMPDIR="$RAM/tmp"
 mapfile -t EXTRA < <(grep -v '^[[:space:]]*#' "$ARGS_FILE" | tr -s '[:space:]' '\n' | sed '/^$/d')
 setsid nohup python main.py --port "$PORT" --enable-cors-header "${EXTRA[@]}" \
   > "$RAM/comfyui.log" 2>&1 < /dev/null &
