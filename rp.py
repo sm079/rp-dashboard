@@ -23,7 +23,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 STATE_DIR = ROOT / ".state"
 POD_FILE = STATE_DIR / "pod.json"
-KNOWN_HOSTS = STATE_DIR / "known_hosts"
 REST = "https://rest.runpod.io/v1"
 
 
@@ -91,7 +90,9 @@ def ssh_base(pod, *extra):
     return [
         "ssh", "-i", key, "-p", str(pod["ssh_port"]),
         "-o", "StrictHostKeyChecking=accept-new",
-        "-o", f"UserKnownHostsFile={KNOWN_HOSTS}",
+        # Per pod: RunPod reuses IP:port pairs, and a new pod there has a new
+        # host key, which a shared known_hosts file would reject.
+        "-o", f"UserKnownHostsFile={STATE_DIR / ('known_hosts_' + pod['id'])}",
         "-o", "ServerAliveInterval=30",
         "-o", "ConnectTimeout=15",
         *extra,
@@ -128,9 +129,14 @@ def wait_for_ssh(pod_id, timeout=900):
         if ip and port:
             pod = {"id": pod_id, "ip": ip, "ssh_port": port}
             probe = subprocess.run(ssh_base(pod, "-o", "BatchMode=yes") + ["true"],
-                                   capture_output=True)
+                                   capture_output=True, text=True)
             if probe.returncode == 0:
                 return pod
+            err = (probe.stderr.strip().splitlines() or ["(no output)"])[-1]
+            msg = f"ssh not ready: {err}"
+            if msg != last:
+                print(f"  [{int(time.time() - start):>3}s] {msg}", flush=True)
+                last = msg
         time.sleep(5)
     return None
 
