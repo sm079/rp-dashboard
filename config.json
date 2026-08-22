@@ -1,0 +1,12 @@
+{
+  "template_id": "cw3nka7d08",
+  "gpu_type": "NVIDIA GeForce RTX 5090",
+  "cloud_type": "SECURE",
+  "container_disk_gb": 150,
+  "pod_name": "comfyui",
+  "ssh_key": "~/.ssh/id_ed25519",
+  "local_port": 8188,
+  "outputs_dir": "outputs",
+  "workflows_dir": "workflows",
+  "default_models": ["krea2", "h3"]
+}

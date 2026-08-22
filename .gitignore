@@ -1,0 +1,14 @@
+# Local session state and synced outputs
+.state/
+outputs/
+workflows/
+
+# Secrets
+.env
+*.key
+key.txt
+
+# Python
+__pycache__/
+*.pyc
+.venv/
