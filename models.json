@@ -11,7 +11,9 @@
       ],
       "lightx2v/Autoencoders": {
         "into": "vae_approx",
-        "files": ["lighttaew2_1.safetensors"]
+        "files": [
+          "lighttaew2_1.safetensors"
+        ]
       }
     }
   },
@@ -28,11 +30,15 @@
       ],
       "drbaph/MiniMax-H3-Turbo-Lora-ComfyUI": {
         "into": "loras",
-        "files": ["minimax_h3_turbo_v4_step600_ema_pruned_comfyui.safetensors"]
+        "files": [
+          "minimax_h3_turbo_v4_step600_ema_pruned_comfyui.safetensors"
+        ]
       },
       "OzzyGT/taeh3": {
         "into": "vae_approx",
-        "files": ["taeh3.safetensors"]
+        "files": [
+          "taeh3.safetensors"
+        ]
       }
     }
   }
