@@ -39,5 +39,4 @@ Other commands: `status`, `ssh [command]`, `setup` (re-run the remote setup),
 | Set      | Contents                                                       | Size     |
 |----------|----------------------------------------------------------------|----------|
 | `krea2`  | Krea 2 Turbo + Raw (fp8), Qwen3-VL 4B text encoder, VAE        | ~30 GB   |
-| `h3`     | MiniMax H3 T2V/I2V (pruned int8), NVFP4 text encoder, VAEs, 8-step turbo LoRA | ~41 GB |
-| `h3-ref` | MiniMax H3 reference-to-video + 4-step turbo LoRA              | ~21 GB   |
+| `h3`     | MiniMax H3 reference-to-video (pruned int8), NVFP4 text encoder, VAEs, 4-step turbo LoRA | ~41 GB |
