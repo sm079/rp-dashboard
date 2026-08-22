@@ -15,6 +15,8 @@ import subprocess
 import tarfile
 import threading
 import time
+import urllib.request
+import webbrowser
 from pathlib import Path, PurePosixPath
 
 RAM = "/dev/shm/comfy"
@@ -180,10 +182,26 @@ def start_session(pod, ssh_base, local_port):
     return proc, listings
 
 
-def run_connect(pod, config, ssh_base, root):
+def open_when_ready(url, timeout=120):
+    """Open url in the default browser once it responds."""
+    def wait():
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                urllib.request.urlopen(url, timeout=3)
+                webbrowser.open(url)
+                return
+            except OSError:
+                time.sleep(1)
+    threading.Thread(target=wait, daemon=True).start()
+
+
+def run_connect(pod, config, ssh_base, root, open_browser=False):
     syncer = Syncer(pod, config, ssh_base, root)
     local_port = config.get("local_port", 8188)
     session, listings = start_session(pod, ssh_base, local_port)
+    if open_browser:
+        open_when_ready(f"http://localhost:{local_port}/")
     print(f"ComfyUI:   http://localhost:{local_port}")
     print(f"Outputs:   {syncer.out_root}\\<date>\\")
     print(f"Workflows: {syncer.roots['w']}\\")

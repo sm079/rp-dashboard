@@ -22,7 +22,16 @@ inputs, outputs and workflows synced to a local folder.
 
 ## Usage
 
+On Windows, double-click **`start.cmd`**: it launches a pod (or reuses a
+running one), sets everything up, opens ComfyUI in the browser and keeps
+syncing outputs. Press Ctrl+C in that window to stop syncing; it offers to
+terminate the pod. **`stop.cmd`** copies anything unsaved and terminates the
+pod. Closing the window without stopping leaves the pod running and billing.
+
+The same from a shell:
+
 ```sh
+python rp.py start       # up (if needed) + connect + open the browser
 python rp.py up          # launch, set up, download default models (~71 GB, ~2 min)
 python rp.py connect     # tunnel + sync; open http://localhost:8188
 python rp.py down        # copy anything unsaved, then terminate the pod

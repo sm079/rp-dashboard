@@ -2,6 +2,7 @@
 """Run ComfyUI on a RunPod pod that is reachable only over SSH.
 
 Commands:
+  start     launch (or reuse) a pod, connect, open ComfyUI in the browser
   up        launch a pod, run remote setup, download default models
   models    download model sets onto the pod (see models.json)
   connect   open the SSH tunnel to ComfyUI; copy outputs and saved workflows home
@@ -283,7 +284,35 @@ def cmd_down(args):
 
 def cmd_connect(args):
     from sync import run_connect
-    run_connect(current_pod(), CONFIG, ssh_base, ROOT)
+    run_connect(current_pod(), CONFIG, ssh_base, ROOT, open_browser=args.open)
+
+
+def cmd_start(args):
+    """Reuse the recorded pod if it's still running, otherwise launch one; then connect."""
+    pod = load_json(POD_FILE)
+    if pod:
+        try:
+            info = api("GET", f"/pods/{pod['id']}", exit_on_error=False)
+        except urllib.error.HTTPError:
+            info = None
+        if info and info.get("desiredStatus") == "RUNNING" and pod.get("ssh_port"):
+            print(f"Reusing running pod {pod['id']}")
+        else:
+            print(f"Recorded pod {pod['id']} is gone; launching a new one")
+            POD_FILE.unlink(missing_ok=True)
+            pod = None
+    if not pod:
+        cmd_up(argparse.Namespace(gpu=None, min_ram=None, no_setup=False, no_models=False))
+    from sync import run_connect
+    run_connect(current_pod(), CONFIG, ssh_base, ROOT, open_browser=True)
+    try:
+        answer = input("Terminate the pod now? Unsaved files are copied first. [y/N] ")
+    except (EOFError, KeyboardInterrupt):
+        answer = ""
+    if answer.strip().lower() == "y":
+        cmd_down(argparse.Namespace(yes=True, no_sync=False))
+    else:
+        print("Pod left running (and billing). Stop it later with stop.cmd or: python rp.py down")
 
 
 def main():
@@ -299,7 +328,11 @@ def main():
     m = sub.add_parser("models", help="download model sets onto the pod")
     m.add_argument("sets", nargs="*", help="model set names from models.json")
     m.set_defaults(func=cmd_models)
-    sub.add_parser("connect", help="tunnel to ComfyUI and sync outputs").set_defaults(func=cmd_connect)
+    c = sub.add_parser("connect", help="tunnel to ComfyUI and sync outputs")
+    c.add_argument("--open", action="store_true", help="open ComfyUI in the browser once reachable")
+    c.set_defaults(func=cmd_connect)
+    sub.add_parser("start", help="launch or reuse a pod, then connect and open the browser"
+                   ).set_defaults(func=cmd_start)
     sub.add_parser("status", help="show the pod").set_defaults(func=cmd_status)
     s = sub.add_parser("ssh", help="shell on the pod")
     s.add_argument("command", nargs=argparse.REMAINDER)
