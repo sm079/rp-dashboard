@@ -9,5 +9,9 @@
   "outputs_dir": "outputs",
   "workflows_dir": "workflows",
   "settings_dir": "settings",
-  "default_models": ["krea2", "h3"]
+  "default_models": ["krea2", "h3"],
+  "comfyui_version": "v0.39.1",
+  "custom_nodes": [
+    "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite"
+  ]
 }

@@ -29,7 +29,7 @@ cat > "$ARGS_FILE" <<EOF
 --output-directory $RAM/output
 --temp-directory $RAM/temp
 --user-directory $RAM/user
---preview-method auto
+--preview-method taesd
 EOF
 
 # Services the SSH-only setup doesn't use.

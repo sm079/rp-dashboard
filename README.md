@@ -34,7 +34,8 @@ Other commands: `status`, `ssh [command]`, `setup` (re-run the remote setup),
 ## Configuration
 
 - `config.json`: GPU type, cloud type, template, disk size, local folders,
-  default model sets.
+  default model sets, the ComfyUI release to pin (`comfyui_version`) and extra
+  custom nodes (`custom_nodes`, git URLs) installed on each setup.
 - `models.json`: model sets (Hugging Face repo → files). The Comfy-Org repos
   mirror ComfyUI's `models/` layout, so files download straight into place.
 

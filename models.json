@@ -30,9 +30,10 @@
         "into": "loras",
         "files": ["minimax_h3_turbo_v4_step600_ema_pruned_comfyui.safetensors"]
       },
-      "Kijai/MiniMax-H3-TAE": [
-        "vae_approx/taeh3.safetensors"
-      ]
+      "OzzyGT/taeh3": {
+        "into": "vae_approx",
+        "files": ["taeh3.safetensors"]
+      }
     }
   }
 }

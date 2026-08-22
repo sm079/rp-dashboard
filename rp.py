@@ -167,6 +167,12 @@ def cmd_up(args):
 
 def run_setup(pod):
     from sync import push_saved
+    if CONFIG.get("comfyui_version"):
+        print(f"Pinning ComfyUI {CONFIG['comfyui_version']} and installing custom nodes...")
+        rc = ssh_script(pod, ROOT / "remote" / "comfyui.sh",
+                        CONFIG["comfyui_version"], *CONFIG.get("custom_nodes", []))
+        if rc != 0:
+            sys.exit(f"ComfyUI update failed (exit {rc})")
     print("Running remote setup (RAM-only ComfyUI folders, localhost only)...")
     rc = ssh_script(pod, ROOT / "remote" / "setup.sh")
     if rc != 0:
