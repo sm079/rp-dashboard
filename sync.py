@@ -16,7 +16,10 @@ import datetime
 import json
 import queue
 import re
+import shutil
+import socket
 import subprocess
+import sys
 import tarfile
 import threading
 import time
@@ -86,7 +89,71 @@ def output_target(out_root, rel):
     return dest
 
 
-def fetch(pod, ssh_base, remote_dir, rels, target):
+def human(n):
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+
+
+class Progress:
+    """Single-line transfer progress: bar, percent, bytes, speed, current file."""
+
+    def __init__(self, label, total_bytes, total_files):
+        self.label, self.total, self.files = label, max(total_bytes, 1), total_files
+        self.done_bytes, self.done_files, self.name = 0, 0, ""
+        self.start = self.last_draw = time.time()
+        self.tty = sys.stdout.isatty()
+
+    def file(self, name):
+        self.name = name
+
+    def add(self, n):
+        self.done_bytes += n
+        if time.time() - self.last_draw >= 0.1:
+            self.draw()
+
+    def file_done(self):
+        self.done_files += 1
+        self.draw()
+
+    def draw(self, final=False):
+        self.last_draw = time.time()
+        if not self.tty and not final:
+            return
+        frac = min(self.done_bytes / self.total, 1.0)
+        width = 24
+        bar = "#" * int(frac * width) + "-" * (width - int(frac * width))
+        speed = self.done_bytes / max(time.time() - self.start, 1e-6)
+        text = (f"  {self.label} [{bar}] {frac:4.0%}  {human(self.done_bytes)}/{human(self.total)}"
+                f"  {human(speed)}/s  {self.done_files}/{self.files}  {self.name}")
+        cols = shutil.get_terminal_size((100, 20)).columns - 1
+        text = text[:cols]
+        if self.tty:
+            end = "\n" if final else ""
+            sys.stdout.write("\r" + text.ljust(cols) + end)
+        else:
+            sys.stdout.write(text + "\n")
+        sys.stdout.flush()
+
+    def finish(self):
+        self.name = ""
+        self.draw(final=True)
+
+
+class CountingReader:
+    """File wrapper that reports bytes read, for upload progress."""
+
+    def __init__(self, f, on_read):
+        self.f, self.on_read = f, on_read
+
+    def read(self, n=-1):
+        data = self.f.read(n)
+        self.on_read(len(data))
+        return data
+
+
+def fetch(pod, ssh_base, remote_dir, rels, target, progress=None):
     """Stream files from remote_dir as a tar; write each to target(relpath)."""
     cmd = ssh_base(pod, "-o", "BatchMode=yes") + [
         f"tar -C {quote(remote_dir)} -cf - -- " + " ".join(quote(r) for r in rels)]
@@ -100,11 +167,17 @@ def fetch(pod, ssh_base, remote_dir, rels, target):
             dest = target(member.name)
             dest.parent.mkdir(parents=True, exist_ok=True)
             tmp = dest.with_name(dest.name + ".partial")
+            if progress:
+                progress.file(PurePosixPath(member.name).name)
             with open(tmp, "wb") as f:
                 while chunk := src.read(1 << 20):
                     f.write(chunk)
+                    if progress:
+                        progress.add(len(chunk))
             tmp.replace(dest)
             written.append((member.name, dest))
+            if progress:
+                progress.file_done()
     # tarfile stops at the end-of-archive marker; drain tar's block padding or
     # ssh blocks writing it into a full pipe and never exits.
     proc.stdout.read()
@@ -112,14 +185,27 @@ def fetch(pod, ssh_base, remote_dir, rels, target):
     return written
 
 
-def upload(pod, ssh_base, remote_dir, local_root, paths):
+def upload(pod, ssh_base, remote_dir, local_root, paths, progress=None):
     """Stream local files to remote_dir as a tar."""
     cmd = ssh_base(pod, "-o", "BatchMode=yes") + [
-        f"mkdir -p {quote(remote_dir)} && tar -C {quote(remote_dir)} -xf -"]
+        # Extract into a staging dir, then move each file into place (same
+        # tmpfs, so the move is atomic): ComfyUI never sees a partial file and
+        # an interrupted upload leaves nothing behind.
+        f"set -e; dest={quote(remote_dir)}; mkdir -p \"$dest\" {RAM}/.incoming; "
+        f"tmp=$(mktemp -d {RAM}/.incoming/up.XXXXXX); trap 'rm -rf \"$tmp\"' EXIT; "
+        "tar -C \"$tmp\" -xf -; cd \"$tmp\"; "
+        "find . -type f | while IFS= read -r f; do "
+        "mkdir -p \"$dest/$(dirname \"$f\")\"; mv -f \"$f\" \"$dest/$f\"; done"]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
     with tarfile.open(fileobj=proc.stdin, mode="w|") as tar:
         for p in paths:
-            tar.add(p, arcname=p.relative_to(local_root).as_posix())
+            info = tar.gettarinfo(p, arcname=p.relative_to(local_root).as_posix())
+            if progress:
+                progress.file(p.name)
+            with open(p, "rb") as f:
+                tar.addfile(info, CountingReader(f, progress.add) if progress else f)
+            if progress:
+                progress.file_done()
     proc.stdin.close()
     if proc.wait() != 0:
         raise RuntimeError(f"upload to {remote_dir} failed")
@@ -184,7 +270,11 @@ class Syncer:
                 target = lambda rel: output_target(local, rel)
             else:
                 target = lambda rel: Path(local, *safe_parts(rel))
-            for rel, dest in fetch(self.pod, self.ssh_base, KINDS[kind][0], rels, target):
+            total = sum(files[(kind, r)][0] for r in rels)
+            progress = Progress(f"<- {KINDS[kind][2]:<9}", total, len(rels))
+            written = fetch(self.pod, self.ssh_base, KINDS[kind][0], rels, target, progress)
+            progress.finish()
+            for rel, dest in written:
                 size, mtime = files[(kind, rel)]
                 self.pulled.add(f"{kind}|{rel}|{size}|{mtime}")
                 if kind != "o":
@@ -217,7 +307,10 @@ class Syncer:
             if not rels:
                 continue
             local = self.roots[kind]
-            upload(self.pod, self.ssh_base, KINDS[kind][0], local, [local / r for r in rels])
+            paths = [local / r for r in rels]
+            progress = Progress(f"-> {KINDS[kind][2]:<9}", sum(scan[(kind, r)][0] for r in rels), len(rels))
+            upload(self.pod, self.ssh_base, KINDS[kind][0], local, paths, progress)
+            progress.finish()
             for rel in rels:
                 self.local[f"{kind}|{rel}"] = scan[(kind, rel)]
                 if KINDS[kind][3] == "both":
@@ -263,9 +356,23 @@ def open_when_ready(url, timeout=120):
     threading.Thread(target=wait, daemon=True).start()
 
 
+def port_in_use(port):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.bind(("127.0.0.1", port))
+            return False
+        except OSError:
+            return True
+
+
 def run_connect(pod, config, ssh_base, root, open_browser=False):
-    syncer = Syncer(pod, config, ssh_base, root)
     local_port = config.get("local_port", 8288)
+    # The tunnel's port doubles as a lock: two syncs at once would upload the
+    # same files concurrently and corrupt each other's transfers.
+    if port_in_use(local_port):
+        sys.exit(f"Port {local_port} is already in use, most likely by another start/connect "
+                 "window that is already syncing. Use that one, or close it first.")
+    syncer = Syncer(pod, config, ssh_base, root)
     # Local first, so a fresh pod's defaults don't overwrite local settings.
     sent = syncer.push(require_stable=False)
     if sent:
