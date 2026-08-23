@@ -483,10 +483,10 @@ def run_connect(pod, config, ssh_base, root, open_browser=False):
                 session, listings = start_session(pod, ssh_base, local_port)
                 continue
             try:
-                files, session = listings.get(timeout=POLL_SECONDS * 3)
+                files, pod_session = listings.get(timeout=POLL_SECONDS * 3)
             except queue.Empty:
                 continue
-            if session != syncer.session:
+            if pod_session != syncer.session:
                 # Pod RAM was wiped (or set up again): start over, deleting nothing.
                 syncer.ensure_session()
                 syncer.push(require_stable=False)
