@@ -8,9 +8,15 @@ Local layout (<sync_dir>/...):
   settings/   both ways (comfy.settings.json, keybindings)
   loras/      local -> pod (an extra LoRA folder in the pod's RAM)
 
-Both-way folders: latest change wins. Deletions are not propagated.
+Both-way folders: latest change wins, and deletions are mirrored. Deleting a
+local LoRA removes it from the pod. Outputs are never deleted on either side:
+the local copies are the archive.
 On connect, local files are uploaded before anything is pulled, so a fresh pod
 picks up local workflows/settings instead of overwriting them with defaults.
+
+A pod restart wipes its RAM, which would look like every file was deleted.
+The pod's RAM holds a random session id; when it changes (or is missing),
+nothing is deleted locally and local files are uploaded again instead.
 """
 import datetime
 import json
@@ -43,9 +49,14 @@ POLL_SECONDS = 3
 END_MARK = "__END_OF_LISTING__"
 UNSAFE = re.compile(r'[<>:"\\|?*\x00-\x1f]')
 SKIP_SUFFIXES = (".tmp", ".part", ".partial")
+SESSION_FILE = f"{RAM}/.session-id"
+# Refuse to mirror more pod-side deletions than this in one go (per folder),
+# unless they are at most half of that folder's files.
+MASS_DELETE = 3
 
-# Prints "<kind>\t<relpath>\t<size>\t<mtime>" for each pulled file, then END_MARK.
-LIST_CMD = " ".join(
+# Prints "S\t<session id>", then "<kind>\t<relpath>\t<size>\t<mtime>" for each
+# pulled file, then END_MARK.
+LIST_CMD = f"printf 'S\\t%s\\n' \"$(cat {SESSION_FILE} 2>/dev/null || echo none)\"; " + " ".join(
     f"find -L {KINDS[k][0]} {KINDS[k][1]} -type f -printf '{k}\\t%P\\t%s\\t%T@\\n' 2>/dev/null;"
     for k in PULLED
 ) + f" echo {END_MARK};"
@@ -58,17 +69,20 @@ def skipped(name):
 
 
 def parse_listing(lines):
-    """Return {(kind, relpath): (size, mtime)}."""
-    files = {}
+    """Return ({(kind, relpath): (size, mtime)}, session id)."""
+    files, session = {}, None
     for line in lines:
         parts = line.split("\t")
+        if len(parts) == 2 and parts[0] == "S":
+            session = parts[1]
+            continue
         if len(parts) != 4:
             continue
         kind, rel, size, mtime = parts
         if kind not in KINDS or skipped(PurePosixPath(rel).name):
             continue
         files[(kind, rel)] = (int(size), mtime)
-    return files
+    return files, session
 
 
 def safe_parts(rel):
@@ -236,14 +250,90 @@ class Syncer:
         self.pulled = set(state.get("pulled", []))
         # Local versions already in sync with the pod: "kind|rel" -> [size, mtime_ns].
         self.local = state.get("local", {})
+        # The pod RAM session these records belong to.
+        self.session = state.get("session")
         # Remote paths we just uploaded; their next listed version is ours.
         self.acks = set()
         self.last_scan = {}
+        self.warned = set()
 
     def save_state(self):
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
         self.state_file.write_text(json.dumps(
-            {"pod": self.pod["id"], "pulled": sorted(self.pulled), "local": self.local}))
+            {"pod": self.pod["id"], "session": self.session,
+             "pulled": sorted(self.pulled), "local": self.local}))
+
+    def ensure_session(self):
+        """Make sure the pod has a RAM session id; reset records if it's new.
+
+        Returns True if the records were reset (fresh or restarted pod RAM)."""
+        cmd = self.ssh_base(self.pod, "-o", "BatchMode=yes") + [
+            f"[ -s {SESSION_FILE} ] || cat /proc/sys/kernel/random/uuid > {SESSION_FILE}; "
+            f"cat {SESSION_FILE}"]
+        current = subprocess.run(cmd, capture_output=True, text=True, check=True).stdout.strip()
+        if current == self.session:
+            return False
+        if self.session is None and self.local:
+            # Records from before session ids existed, for this same pod: adopt.
+            self.session = current
+            self.save_state()
+            return False
+        if self.session is not None:
+            print("Pod RAM was reset (pod restarted); re-uploading local files, "
+                  "deleting nothing locally.", flush=True)
+        self.session = current
+        self.pulled, self.local, self.acks, self.last_scan = set(), {}, set(), {}
+        self.save_state()
+        return True
+
+    # --- deletions --------------------------------------------------------
+
+    def apply_deletions(self, files, prev_files):
+        """Mirror deletions of files that were in sync on both sides.
+
+        A pod-side deletion counts only if the file is missing from two
+        consecutive listings, wasn't just uploaded, and is unchanged locally."""
+        scan = self.scan_local()
+        local_gone, remote_gone = {}, {}
+        for key, sig in list(self.local.items()):
+            kind, rel = key.split("|", 1)
+            if kind not in KINDS or KINDS[kind][3] == "pull":
+                continue
+            if (kind, rel) not in scan:
+                if self.roots[kind].is_dir():
+                    local_gone.setdefault(kind, []).append(rel)
+            elif (KINDS[kind][3] == "both" and (kind, rel) not in files
+                  and (kind, rel) not in prev_files and (kind, rel) not in self.acks
+                  and scan[(kind, rel)] == sig):
+                remote_gone.setdefault(kind, []).append(rel)
+
+        changed = False
+        for kind, rels in local_gone.items():
+            cmd = self.ssh_base(self.pod, "-o", "BatchMode=yes") + [
+                f"cd {quote(KINDS[kind][0])} && rm -f -- " + " ".join(quote(r) for r in rels)]
+            if subprocess.run(cmd, capture_output=True).returncode != 0:
+                continue
+            for rel in rels:
+                self.local.pop(f"{kind}|{rel}", None)
+                print(f"  deleted on pod  {KINDS[kind][2]}/{rel}", flush=True)
+            changed = True
+
+        for kind, rels in remote_gone.items():
+            tracked = sum(1 for k in self.local if k.startswith(kind + "|"))
+            if len(rels) > MASS_DELETE and len(rels) > tracked / 2:
+                if kind not in self.warned:
+                    print(f"  NOT deleting {len(rels)} local {KINDS[kind][2]} files that vanished "
+                          "from the pod at once; delete them by hand if that was intended.",
+                          flush=True)
+                    self.warned.add(kind)
+                continue
+            for rel in rels:
+                Path(self.roots[kind], *safe_parts(rel)).unlink(missing_ok=True)
+                self.local.pop(f"{kind}|{rel}", None)
+                print(f"  deleted locally {KINDS[kind][2]}/{rel}", flush=True)
+            changed = True
+        if changed:
+            self.save_state()
 
     # --- pod -> local ----------------------------------------------------
 
@@ -373,6 +463,7 @@ def run_connect(pod, config, ssh_base, root, open_browser=False):
         sys.exit(f"Port {local_port} is already in use, most likely by another start/connect "
                  "window that is already syncing. Use that one, or close it first.")
     syncer = Syncer(pod, config, ssh_base, root)
+    syncer.ensure_session()
     # Local first, so a fresh pod's defaults don't overwrite local settings.
     sent = syncer.push(require_stable=False)
     if sent:
@@ -383,7 +474,7 @@ def run_connect(pod, config, ssh_base, root, open_browser=False):
     print(f"ComfyUI: http://localhost:{local_port}")
     print(f"Synced:  {syncer.base}\\  (outputs, inputs, workflows, settings, loras)")
     print("Ctrl+C to stop syncing; the pod keeps running.", flush=True)
-    seen = {}
+    seen, prev_files = {}, None
     try:
         while True:
             if session.poll() is not None:
@@ -392,9 +483,18 @@ def run_connect(pod, config, ssh_base, root, open_browser=False):
                 session, listings = start_session(pod, ssh_base, local_port)
                 continue
             try:
-                files = listings.get(timeout=POLL_SECONDS * 3)
+                files, session = listings.get(timeout=POLL_SECONDS * 3)
             except queue.Empty:
                 continue
+            if session != syncer.session:
+                # Pod RAM was wiped (or set up again): start over, deleting nothing.
+                syncer.ensure_session()
+                syncer.push(require_stable=False)
+                seen, prev_files = {}, None
+                continue
+            if prev_files is not None:
+                syncer.apply_deletions(files, prev_files)
+            prev_files = files
             # Pull a file once it looks the same on two consecutive listings,
             # so half-written videos aren't fetched.
             ready = [key for key in syncer.pending_pulls(files) if seen.get(key) == files[key]]
@@ -416,7 +516,10 @@ def sync_once(pod, config, ssh_base, root):
     res = subprocess.run(cmd, capture_output=True, text=True)
     if res.returncode != 0:
         raise RuntimeError(f"could not list pod files: {res.stderr.strip()}")
-    files = parse_listing(res.stdout.splitlines())
+    files, session = parse_listing(res.stdout.splitlines())
+    if session != syncer.session:
+        # Records belong to another RAM session; pull outputs as new.
+        syncer.pulled, syncer.local, syncer.session = set(), {}, session
     todo = syncer.pending_pulls(files)
     if todo:
         syncer.pull(todo, files)
