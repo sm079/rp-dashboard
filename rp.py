@@ -151,14 +151,19 @@ def cmd_up(args):
     for attempt in range(1, attempts + 1):
         pod = launch(args, timeout)
         if pod:
-            break
-        # A pod with no SSH after the timeout is usually stuck pulling the image
-        # on an uncached host; it bills meanwhile, so replace it.
-        stuck = load_json(POD_FILE)
-        api("DELETE", f"/pods/{stuck['id']}")
+            healthy, detail = health_check(pod)
+            print(f"  host check: {detail}", flush=True)
+            if healthy:
+                break
+            reason = "host is overloaded"
+        else:
+            # Usually stuck pulling the image on an uncached host.
+            reason = f"no SSH after {timeout}s"
+        # Either way the pod bills while unusable, so replace it.
+        bad = load_json(POD_FILE)
+        api("DELETE", f"/pods/{bad['id']}")
         POD_FILE.unlink(missing_ok=True)
-        print(f"Pod {stuck['id']} had no SSH after {timeout}s; terminated it "
-              f"(attempt {attempt}/{attempts}).", flush=True)
+        print(f"Pod {bad['id']}: {reason}; terminated it (attempt {attempt}/{attempts}).", flush=True)
     else:
         sys.exit("Could not get a reachable pod. Try again later or another GPU type (--gpu).")
     save_json(POD_FILE, pod)
@@ -180,6 +185,33 @@ def profile_models(name):
     if name not in profiles:
         sys.exit(f"Unknown profile {name!r}. Known: {', '.join(profiles)}")
     return profiles[name]["models"]
+
+
+def health_check(pod):
+    """Time an SSH round trip and a direct 512 MB disk write on the pod.
+
+    Some hosts are so oversubscribed that ComfyUI takes minutes to start and
+    SSH stalls; catching that here lets `up` replace the pod straight away.
+    """
+    limits = CONFIG.get("health_limits", {"ssh_s": 10, "disk_write_s": 8})
+    cmd = ("start=$(date +%s.%N); dd if=/dev/zero of=/root/.rp_health bs=1M count=512 "
+           "oflag=direct status=none; end=$(date +%s.%N); rm -f /root/.rp_health; "
+           "echo $start $end; cut -d' ' -f1 /proc/loadavg; nproc")
+    t0 = time.time()
+    try:
+        res = subprocess.run(ssh_base(pod, "-o", "BatchMode=yes") + [cmd],
+                             capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        return False, "check timed out after 120s"
+    total = time.time() - t0
+    try:
+        start, end, load, cpus = res.stdout.split()
+        disk = float(end) - float(start)
+    except ValueError:
+        return False, f"check failed: {res.stderr.strip()[-200:]}"
+    ssh_s = total - disk
+    detail = f"ssh {ssh_s:.1f}s, 512 MB disk write {disk:.1f}s, load {load} on {cpus} CPUs"
+    return ssh_s <= limits["ssh_s"] and disk <= limits["disk_write_s"], detail
 
 
 def launch(args, timeout):
