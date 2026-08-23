@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Restart the template's ComfyUI so that:
-#  - inputs, outputs, temp files, workflows/settings and logs live in RAM
+#  - inputs, outputs, temp files, workflows/settings, synced LoRAs and logs live in RAM
 #    (/dev/shm);
 #  - it listens on localhost only, reachable through the SSH tunnel;
 #  - it is restarted automatically if it exits (e.g. killed for running out of RAM).
@@ -16,12 +16,19 @@ SUPERVISOR_PID="$RAM/supervisor.pid"
 [ -d "$COMFY_DIR" ] || { echo "ComfyUI not found at $COMFY_DIR" >&2; exit 1; }
 echo "$COMFY_DIR" > /root/.comfyui_dir
 
-mkdir -p "$RAM"/{input,output,temp,user,tmp}
+mkdir -p "$RAM"/{input,output,temp,user,tmp,loras}
 chmod 700 "$RAM"
 # Seed the RAM user dir with the template's default settings (no user data yet).
 if [ -d "$COMFY_DIR/user" ] && [ -z "$(ls -A "$RAM/user")" ]; then
   cp -a "$COMFY_DIR/user/." "$RAM/user/"
 fi
+
+# LoRAs synced from the local sync folder live in RAM as an extra LoRA folder.
+cat > "$RAM/extra_model_paths.yaml" <<EOF
+runpod_helper:
+  base_path: $RAM
+  loras: loras
+EOF
 
 # Later flags win, so these override the template's --listen 0.0.0.0.
 # Written to the args file too, so a pod restart comes back the same way.
@@ -33,6 +40,7 @@ fi
   echo "--temp-directory $RAM/temp"
   echo "--user-directory $RAM/user"
   echo "--preview-method auto"
+  echo "--extra-model-paths-config $RAM/extra_model_paths.yaml"
   for arg in "$@"; do echo "$arg"; done
 } > "$ARGS_FILE"
 

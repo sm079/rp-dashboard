@@ -8,14 +8,16 @@
   "launch_attempts": 3,
   "pod_name": "comfyui",
   "ssh_key": "~/.ssh/id_ed25519",
-  "local_port": 8188,
-  "outputs_dir": "outputs",
-  "workflows_dir": "workflows",
-  "settings_dir": "settings",
-  "default_models": [
-    "krea2",
-    "h3"
-  ],
+  "local_port": 8288,
+  "sync_dir": "sync",
+  "profiles": {
+    "default": {
+      "models": [
+        "krea2",
+        "h3"
+      ]
+    }
+  },
   "comfyui_version": "v0.39.1",
   "comfyui_args": [
     "--fast-disk"
