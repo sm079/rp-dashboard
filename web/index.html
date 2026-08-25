@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Pod Control</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='none' stroke='%2334d399' stroke-width='3'/%3E%3Ccircle cx='16' cy='16' r='6' fill='%2334d399'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="app.css">
+</head>
+<body data-state="idle" class="booting">
+
+<div class="ambient" aria-hidden="true">
+  <div class="blob b1"></div>
+  <div class="blob b2"></div>
+  <div class="blob b3"></div>
+  <div class="gridlines"></div>
+</div>
+
+<div class="app">
+  <header class="top">
+    <div class="brand">
+      <svg viewBox="0 0 32 32" class="brand-mark" aria-hidden="true">
+        <circle cx="16" cy="16" r="12.5" class="bm-ring"/>
+        <circle cx="16" cy="16" r="5.5" class="bm-core"/>
+      </svg>
+      <div class="brand-text">
+        <span class="brand-name">Pod Control</span>
+        <span class="brand-sub" id="brandSub">ComfyUI on RunPod · SSH only</span>
+      </div>
+    </div>
+    <div class="top-right">
+      <div class="conn" id="conn" title="Connection to the local dashboard server">
+        <span class="conn-dot"></span><span id="connText">Connecting</span>
+      </div>
+      <button class="btn ghost sm" id="openFolder" type="button">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M2.5 5.5a1.5 1.5 0 0 1 1.5-1.5h3.6l1.8 2h6.6a1.5 1.5 0 0 1 1.5 1.5v7a1.5 1.5 0 0 1-1.5 1.5H4a1.5 1.5 0 0 1-1.5-1.5z"/></svg>
+        Sync folder
+      </button>
+      <button class="btn ghost sm icon" id="quit" type="button" title="Quit dashboard" aria-label="Quit dashboard">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2.5v7M5.6 5.2a6.5 6.5 0 1 0 8.8 0"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <main class="grid">
+    <!-- Hero: state, controls and the launch sequence -->
+    <section class="card hero" style="--i:0">
+      <div class="hero-main">
+        <div class="orb" id="orb" aria-hidden="true">
+          <div class="ripples" id="ripples"></div>
+          <svg viewBox="0 0 200 200">
+            <defs>
+              <radialGradient id="coreGrad" cx="50%" cy="40%" r="60%">
+                <stop offset="0%" class="cg-a"/>
+                <stop offset="70%" class="cg-b"/>
+                <stop offset="100%" class="cg-c"/>
+              </radialGradient>
+            </defs>
+            <circle cx="100" cy="100" r="92" class="o-halo"/>
+            <circle cx="100" cy="100" r="80" class="o-track"/>
+            <g class="o-spin"><circle cx="100" cy="100" r="80" class="o-arc"/></g>
+            <g class="o-ticks-g"><circle cx="100" cy="100" r="68" class="o-ticks"/></g>
+            <circle cx="100" cy="100" r="50" class="o-core"/>
+            <g class="o-glyph" id="orbGlyph"></g>
+          </svg>
+        </div>
+
+        <div class="hero-copy">
+          <div class="eyebrow"><span class="live-dot"></span><span id="eyebrow">Status</span></div>
+          <h1 class="state-title" id="stateTitle">Idle</h1>
+          <p class="state-sub" id="stateSub">No pod running. Nothing is billing.</p>
+
+          <div class="profile" id="profileWrap">
+            <span class="label">Models</span>
+            <div class="seg" id="profiles" role="radiogroup" aria-label="Model profile"></div>
+          </div>
+
+          <div class="actions" id="actions"></div>
+        </div>
+      </div>
+
+      <ol class="steps" id="steps" aria-label="Progress"></ol>
+    </section>
+
+    <!-- Pod: billing and hardware -->
+    <section class="card pod" style="--i:1">
+      <header class="card-head">
+        <h2>Pod</h2>
+        <span class="pill" id="podPill">None</span>
+      </header>
+      <div class="cost">
+        <div class="cost-label">This session</div>
+        <div class="cost-value"><span class="cur">$</span><span id="cost">0.000</span></div>
+        <div class="cost-rate" id="rate">— / hr</div>
+      </div>
+      <dl class="metrics">
+        <div class="metric"><dt>Uptime</dt><dd id="uptime" class="mono">—</dd></div>
+        <div class="metric"><dt>GPU</dt><dd id="gpu">—</dd></div>
+        <div class="metric"><dt>Host</dt><dd id="host">—</dd></div>
+        <div class="metric"><dt>Pod id</dt><dd id="podId" class="mono">—</dd></div>
+      </dl>
+    </section>
+
+    <!-- Sync: live transfers and folder counts -->
+    <section class="card sync" style="--i:2">
+      <header class="card-head">
+        <h2>Sync</h2>
+        <span class="pill" id="syncPill">Off</span>
+      </header>
+      <div class="xfer" id="xfer">
+        <div class="xfer-top">
+          <span class="xfer-dir" id="xferDir">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3v14M4.5 11.5 10 17l5.5-5.5"/></svg>
+          </span>
+          <span class="xfer-name" id="xferName">Waiting for changes</span>
+          <span class="xfer-pct mono" id="xferPct"></span>
+        </div>
+        <div class="bar"><div class="bar-fill" id="xferBar"></div></div>
+        <div class="xfer-meta mono"><span id="xferBytes">—</span><span id="xferSpeed"></span></div>
+      </div>
+      <canvas class="spark" id="spark" aria-label="Transfer speed, last two minutes"></canvas>
+      <div class="beat"><span class="beat-dot" id="beatDot"></span><span id="beatText">Not watching the pod</span></div>
+      <ul class="folders" id="folders"></ul>
+    </section>
+
+    <!-- Latest outputs -->
+    <section class="card outputs" style="--i:3">
+      <header class="card-head">
+        <h2>Latest outputs</h2>
+        <span class="muted small" id="outToday"></span>
+      </header>
+      <div class="strip" id="strip"></div>
+    </section>
+
+    <!-- Activity log -->
+    <section class="card activity" style="--i:4">
+      <header class="card-head">
+        <h2>Activity</h2>
+        <button class="btn ghost xs" id="follow" type="button" aria-pressed="true">Following</button>
+      </header>
+      <div class="log" id="log" role="log" aria-live="polite"></div>
+    </section>
+  </main>
+</div>
+
+<div class="modal" id="modal" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <div class="modal-icon" id="modalIcon"></div>
+    <h3 id="modalTitle"></h3>
+    <p id="modalBody"></p>
+    <div class="modal-actions">
+      <button class="btn ghost" id="modalCancel" type="button">Cancel</button>
+      <button class="btn danger" id="modalOk" type="button">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<div class="toasts" id="toasts" aria-live="assertive"></div>
+
+<div class="offline" id="offline" hidden>
+  <div class="offline-card">
+    <h3>Dashboard closed</h3>
+    <p>The dashboard server has stopped. A running pod keeps running and billing. Open the dashboard again to manage it.</p>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
