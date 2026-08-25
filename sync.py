@@ -33,6 +33,8 @@ import urllib.request
 import webbrowser
 from pathlib import Path, PurePosixPath
 
+from events import emit
+
 RAM = "/dev/shm/comfy"
 # kind -> (remote dir, extra find args, local subfolder, direction)
 KINDS = {
@@ -113,8 +115,9 @@ def human(n):
 class Progress:
     """Single-line transfer progress: bar, percent, bytes, speed, current file."""
 
-    def __init__(self, label, total_bytes, total_files):
+    def __init__(self, label, total_bytes, total_files, folder="", direction=""):
         self.label, self.total, self.files = label, max(total_bytes, 1), total_files
+        self.folder, self.direction = folder, direction
         self.done_bytes, self.done_files, self.name = 0, 0, ""
         self.start = self.last_draw = time.time()
         self.tty = sys.stdout.isatty()
@@ -133,12 +136,15 @@ class Progress:
 
     def draw(self, final=False):
         self.last_draw = time.time()
+        speed = self.done_bytes / max(time.time() - self.start, 1e-6)
+        emit("transfer", folder=self.folder, direction=self.direction, done=self.done_bytes,
+             total=self.total, files_done=self.done_files, files=self.files, name=self.name,
+             speed=speed, final=final)
         if not self.tty and not final:
             return
         frac = min(self.done_bytes / self.total, 1.0)
         width = 24
         bar = "#" * int(frac * width) + "-" * (width - int(frac * width))
-        speed = self.done_bytes / max(time.time() - self.start, 1e-6)
         text = (f"  {self.label} [{bar}] {frac:4.0%}  {human(self.done_bytes)}/{human(self.total)}"
                 f"  {human(speed)}/s  {self.done_files}/{self.files}  {self.name}")
         cols = shutil.get_terminal_size((100, 20)).columns - 1
@@ -361,7 +367,7 @@ class Syncer:
             else:
                 target = lambda rel: Path(local, *safe_parts(rel))
             total = sum(files[(kind, r)][0] for r in rels)
-            progress = Progress(f"<- {KINDS[kind][2]:<9}", total, len(rels))
+            progress = Progress(f"<- {KINDS[kind][2]:<9}", total, len(rels), KINDS[kind][2], "down")
             written = fetch(self.pod, self.ssh_base, KINDS[kind][0], rels, target, progress)
             progress.finish()
             for rel, dest in written:
@@ -398,7 +404,8 @@ class Syncer:
                 continue
             local = self.roots[kind]
             paths = [local / r for r in rels]
-            progress = Progress(f"-> {KINDS[kind][2]:<9}", sum(scan[(kind, r)][0] for r in rels), len(rels))
+            progress = Progress(f"-> {KINDS[kind][2]:<9}", sum(scan[(kind, r)][0] for r in rels),
+                                len(rels), KINDS[kind][2], "up")
             upload(self.pod, self.ssh_base, KINDS[kind][0], local, paths, progress)
             progress.finish()
             for rel in rels:
@@ -462,6 +469,7 @@ def run_connect(pod, config, ssh_base, root, open_browser=False):
     if port_in_use(local_port):
         sys.exit(f"Port {local_port} is already in use, most likely by another start/connect "
                  "window that is already syncing. Use that one, or close it first.")
+    emit("phase", name="connect")
     syncer = Syncer(pod, config, ssh_base, root)
     syncer.ensure_session()
     # Local first, so a fresh pod's defaults don't overwrite local settings.
@@ -474,6 +482,7 @@ def run_connect(pod, config, ssh_base, root, open_browser=False):
     print(f"ComfyUI: http://localhost:{local_port}")
     print(f"Synced:  {syncer.base}\\  (outputs, inputs, workflows, settings, loras)")
     print("Ctrl+C to stop syncing; the pod keeps running.", flush=True)
+    emit("phase", name="live", port=local_port)
     seen, prev_files = {}, None
     try:
         while True:
@@ -486,6 +495,7 @@ def run_connect(pod, config, ssh_base, root, open_browser=False):
                 files, pod_session = listings.get(timeout=POLL_SECONDS * 3)
             except queue.Empty:
                 continue
+            emit("heartbeat")
             if pod_session != syncer.session:
                 # Pod RAM was wiped (or set up again): start over, deleting nothing.
                 syncer.ensure_session()

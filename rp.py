@@ -4,6 +4,7 @@
 Commands:
   start     launch (or reuse) a pod, connect, open ComfyUI in the browser
             (--profile <name> picks the model sets; see config.json)
+  (dashboard.py serves a web UI for start/stop and runs these commands)
   up        launch a pod, run remote setup, download default models
   models    download model sets onto the pod (see models.json)
   connect   open the SSH tunnel to ComfyUI; sync the local sync folder
@@ -20,6 +21,9 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+import events
+from events import emit
 
 ROOT = Path(__file__).resolve().parent
 STATE_DIR = ROOT / ".state"
@@ -82,6 +86,16 @@ def current_pod():
     if not pod:
         sys.exit("No pod recorded. Run: python rp.py up")
     return pod
+
+
+def ask(prompt):
+    """input() that answers "" when there is no one to ask (dashboard, closed stdin)."""
+    if events.ENABLED:
+        return ""
+    try:
+        return input(prompt)
+    except EOFError:
+        return ""
 
 
 # --- SSH helpers ------------------------------------------------------------
@@ -193,6 +207,7 @@ def health_check(pod):
     Some hosts are so oversubscribed that ComfyUI takes minutes to start and
     SSH stalls; catching that here lets `up` replace the pod straight away.
     """
+    emit("phase", name="health")
     limits = CONFIG.get("health_limits", {"ssh_s": 10, "disk_write_s": 8})
     cmd = ("start=$(date +%s.%N); dd if=/dev/zero of=/root/.rp_health bs=1M count=512 "
            "oflag=direct status=none; end=$(date +%s.%N); rm -f /root/.rp_health; "
@@ -231,6 +246,7 @@ def launch(args, timeout):
         "supportPublicIp": True,
     }
     print(f"Launching {body['gpuTypeIds'][0]} ({body['cloudType']}) from template {body['templateId']}")
+    emit("phase", name="launch", detail=body["gpuTypeIds"][0])
     wait_s = CONFIG.get("capacity_wait_s", 600)
     start = time.time()
     while True:
@@ -243,14 +259,21 @@ def launch(args, timeout):
                 sys.exit(f"RunPod API POST /pods failed: {e.code} {detail}")
             print(f"  no {body['gpuTypeIds'][0]} available yet; retrying "
                   f"({int(time.time() - start)}s of {wait_s}s)", flush=True)
+            emit("phase", name="launch", detail="waiting for a free GPU")
             time.sleep(30)
     pod_id = created["id"]
     print(f"Pod {pod_id} created, ${created.get('costPerHr', '?')}/hr. Waiting for SSH...", flush=True)
-    save_json(POD_FILE, {"id": pod_id})
-    return wait_for_ssh(pod_id, timeout)
+    emit("phase", name="ssh", detail=pod_id)
+    created_at = time.time()
+    save_json(POD_FILE, {"id": pod_id, "created": created_at})
+    pod = wait_for_ssh(pod_id, timeout)
+    if pod:
+        pod["created"] = created_at
+    return pod
 
 
 def run_setup(pod):
+    emit("phase", name="setup")
     if CONFIG.get("comfyui_version"):
         print(f"Pinning ComfyUI {CONFIG['comfyui_version']} and installing custom nodes...")
         rc = ssh_script(pod, ROOT / "remote" / "comfyui.sh",
@@ -285,6 +308,7 @@ def download_models(pod, names):
             specs.append(f"{repo}::{into}::{','.join(files)}")
     total = sum(catalog[n].get("size_gb", 0) for n in names)
     print(f"Downloading {', '.join(names)} (~{total:.0f} GB) on the pod")
+    emit("phase", name="models", detail=", ".join(names))
     return ssh_script(pod, ROOT / "remote" / "models.sh", *specs)
 
 
@@ -308,19 +332,21 @@ def cmd_down(args):
     from sync import sync_once
     pod = current_pod()
     if not args.no_sync:
+        emit("phase", name="copy")
         print("Copying any outputs and workflows not yet saved locally...")
         try:
             n = sync_once(pod, CONFIG, ssh_base, ROOT)
             print(f"  {n} file(s) copied" if n else "  everything already saved")
         except Exception as e:  # noqa: BLE001 - report and let the user decide
             print(f"  final copy failed: {e}")
-            if input("Terminate anyway? [y/N] ").strip().lower() != "y":
-                return
+            if ask("Terminate anyway? [y/N] ").strip().lower() != "y":
+                sys.exit("Final copy failed; the pod was not terminated.")
     if not args.yes:
-        answer = input(f"Terminate pod {pod['id']}? Everything on it is deleted. [y/N] ")
+        answer = ask(f"Terminate pod {pod['id']}? Everything on it is deleted. [y/N] ")
         if answer.strip().lower() != "y":
             print("Cancelled.")
             return
+    emit("phase", name="terminate")
     api("DELETE", f"/pods/{pod['id']}")
     POD_FILE.unlink(missing_ok=True)
     print(f"Pod {pod['id']} terminated.")
@@ -341,6 +367,7 @@ def cmd_start(args):
             info = None
         if info and info.get("desiredStatus") == "RUNNING" and pod.get("ssh_port"):
             print(f"Reusing running pod {pod['id']}")
+            emit("reuse", pod=pod["id"])
             # The running pod may have been started with another profile.
             rc = download_models(pod, profile_models(args.profile))
             if rc != 0:
@@ -353,15 +380,17 @@ def cmd_start(args):
         cmd_up(argparse.Namespace(gpu=None, min_ram=None, no_setup=False, no_models=False,
                                   profile=args.profile))
     from sync import run_connect
-    run_connect(current_pod(), CONFIG, ssh_base, ROOT, open_browser=True)
+    run_connect(current_pod(), CONFIG, ssh_base, ROOT, open_browser=not args.no_open)
+    if events.ENABLED:
+        return
     try:
-        answer = input("Terminate the pod now? Unsaved files are copied first. [y/N] ")
-    except (EOFError, KeyboardInterrupt):
+        answer = ask("Terminate the pod now? Unsaved files are copied first. [y/N] ")
+    except KeyboardInterrupt:
         answer = ""
     if answer.strip().lower() == "y":
         cmd_down(argparse.Namespace(yes=True, no_sync=False))
     else:
-        print("Pod left running (and billing). Stop it later with stop.cmd or: python rp.py down")
+        print("Pod left running (and billing). Stop it later from the dashboard or: python rp.py down")
 
 
 def main():
@@ -384,6 +413,7 @@ def main():
     c.set_defaults(func=cmd_connect)
     st = sub.add_parser("start", help="launch or reuse a pod, then connect and open the browser")
     st.add_argument("--profile", help="model profile from config.json (default: default)")
+    st.add_argument("--no-open", action="store_true", help="don't open ComfyUI in the browser")
     st.set_defaults(func=cmd_start)
     sub.add_parser("status", help="show the pod").set_defaults(func=cmd_status)
     s = sub.add_parser("ssh", help="shell on the pod")
@@ -394,7 +424,13 @@ def main():
     d.add_argument("--no-sync", action="store_true", help="skip the final copy of outputs")
     d.set_defaults(func=cmd_down)
     args = p.parse_args()
-    args.func(args)
+    try:
+        if events.ENABLED:
+            events.watch_stdin()
+        args.func(args)
+    except KeyboardInterrupt:
+        print("\nInterrupted.", flush=True)
+        sys.exit(130)
 
 
 if __name__ == "__main__":
