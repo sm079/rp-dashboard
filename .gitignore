@@ -1,8 +1,6 @@
-# Local session state and synced outputs
+# Local session state and the folder synced with the pod
 .state/
-outputs/
-workflows/
-settings/
+sync/
 
 # Secrets
 .env

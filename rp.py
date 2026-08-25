@@ -3,9 +3,10 @@
 
 Commands:
   start     launch (or reuse) a pod, connect, open ComfyUI in the browser
+            (--profile <name> picks the model sets; see config.json)
   up        launch a pod, run remote setup, download default models
   models    download model sets onto the pod (see models.json)
-  connect   open the SSH tunnel to ComfyUI; copy outputs and saved workflows home
+  connect   open the SSH tunnel to ComfyUI; sync the local sync folder
   status    show the current pod
   ssh       open an interactive shell on the pod
   down      copy anything unsaved, then terminate the pod
@@ -150,14 +151,19 @@ def cmd_up(args):
     for attempt in range(1, attempts + 1):
         pod = launch(args, timeout)
         if pod:
-            break
-        # A pod with no SSH after the timeout is usually stuck pulling the image
-        # on an uncached host; it bills meanwhile, so replace it.
-        stuck = load_json(POD_FILE)
-        api("DELETE", f"/pods/{stuck['id']}")
+            healthy, detail = health_check(pod)
+            print(f"  host check: {detail}", flush=True)
+            if healthy:
+                break
+            reason = "host is overloaded"
+        else:
+            # Usually stuck pulling the image on an uncached host.
+            reason = f"no SSH after {timeout}s"
+        # Either way the pod bills while unusable, so replace it.
+        bad = load_json(POD_FILE)
+        api("DELETE", f"/pods/{bad['id']}")
         POD_FILE.unlink(missing_ok=True)
-        print(f"Pod {stuck['id']} had no SSH after {timeout}s; terminated it "
-              f"(attempt {attempt}/{attempts}).", flush=True)
+        print(f"Pod {bad['id']}: {reason}; terminated it (attempt {attempt}/{attempts}).", flush=True)
     else:
         sys.exit("Could not get a reachable pod. Try again later or another GPU type (--gpu).")
     save_json(POD_FILE, pod)
@@ -166,10 +172,46 @@ def cmd_up(args):
         return
     run_setup(pod)
     if not args.no_models:
-        rc = download_models(pod, CONFIG.get("default_models", []))
+        rc = download_models(pod, profile_models(args.profile))
         if rc != 0:
             sys.exit(f"Model download failed (exit {rc}); retry with: python rp.py models")
     print("Ready. Next: python rp.py connect")
+
+
+def profile_models(name):
+    """Model sets for a profile in config.json ("default" if name is None)."""
+    profiles = CONFIG.get("profiles", {})
+    name = name or "default"
+    if name not in profiles:
+        sys.exit(f"Unknown profile {name!r}. Known: {', '.join(profiles)}")
+    return profiles[name]["models"]
+
+
+def health_check(pod):
+    """Time an SSH round trip and a direct 512 MB disk write on the pod.
+
+    Some hosts are so oversubscribed that ComfyUI takes minutes to start and
+    SSH stalls; catching that here lets `up` replace the pod straight away.
+    """
+    limits = CONFIG.get("health_limits", {"ssh_s": 10, "disk_write_s": 8})
+    cmd = ("start=$(date +%s.%N); dd if=/dev/zero of=/root/.rp_health bs=1M count=512 "
+           "oflag=direct status=none; end=$(date +%s.%N); rm -f /root/.rp_health; "
+           "echo $start $end; cut -d' ' -f1 /proc/loadavg; nproc")
+    t0 = time.time()
+    try:
+        res = subprocess.run(ssh_base(pod, "-o", "BatchMode=yes") + [cmd],
+                             capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        return False, "check timed out after 120s"
+    total = time.time() - t0
+    try:
+        start, end, load, cpus = res.stdout.split()
+        disk = float(end) - float(start)
+    except ValueError:
+        return False, f"check failed: {res.stderr.strip()[-200:]}"
+    ssh_s = total - disk
+    detail = f"ssh {ssh_s:.1f}s, 512 MB disk write {disk:.1f}s, load {load} on {cpus} CPUs"
+    return ssh_s <= limits["ssh_s"] and disk <= limits["disk_write_s"], detail
 
 
 def launch(args, timeout):
@@ -209,7 +251,6 @@ def launch(args, timeout):
 
 
 def run_setup(pod):
-    from sync import push_saved
     if CONFIG.get("comfyui_version"):
         print(f"Pinning ComfyUI {CONFIG['comfyui_version']} and installing custom nodes...")
         rc = ssh_script(pod, ROOT / "remote" / "comfyui.sh",
@@ -220,9 +261,6 @@ def run_setup(pod):
     rc = ssh_script(pod, ROOT / "remote" / "setup.sh", *CONFIG.get("comfyui_args", []))
     if rc != 0:
         sys.exit(f"Remote setup failed (exit {rc})")
-    counts = push_saved(pod, ssh_base, CONFIG, ROOT)
-    if counts:
-        print(f"Restored {counts.get('w', 0)} workflow(s) and {counts.get('s', 0)} settings file(s)")
 
 
 def cmd_setup(args):
@@ -230,7 +268,7 @@ def cmd_setup(args):
 
 
 def cmd_models(args):
-    sys.exit(download_models(current_pod(), args.sets or CONFIG.get("default_models", [])))
+    sys.exit(download_models(current_pod(), args.sets or profile_models(args.profile)))
 
 
 def download_models(pod, names):
@@ -303,12 +341,17 @@ def cmd_start(args):
             info = None
         if info and info.get("desiredStatus") == "RUNNING" and pod.get("ssh_port"):
             print(f"Reusing running pod {pod['id']}")
+            # The running pod may have been started with another profile.
+            rc = download_models(pod, profile_models(args.profile))
+            if rc != 0:
+                sys.exit(f"Model download failed (exit {rc})")
         else:
             print(f"Recorded pod {pod['id']} is gone; launching a new one")
             POD_FILE.unlink(missing_ok=True)
             pod = None
     if not pod:
-        cmd_up(argparse.Namespace(gpu=None, min_ram=None, no_setup=False, no_models=False))
+        cmd_up(argparse.Namespace(gpu=None, min_ram=None, no_setup=False, no_models=False,
+                                  profile=args.profile))
     from sync import run_connect
     run_connect(current_pod(), CONFIG, ssh_base, ROOT, open_browser=True)
     try:
@@ -328,17 +371,20 @@ def main():
     up.add_argument("--gpu", help="override the GPU type id from config.json")
     up.add_argument("--min-ram", type=int, help="override min_ram_gb from config.json")
     up.add_argument("--no-setup", action="store_true", help="only launch; skip setup and models")
-    up.add_argument("--no-models", action="store_true", help="skip downloading default models")
+    up.add_argument("--no-models", action="store_true", help="skip downloading the profile's models")
+    up.add_argument("--profile", help="model profile from config.json (default: default)")
     up.set_defaults(func=cmd_up)
     sub.add_parser("setup", help="re-run the remote setup").set_defaults(func=cmd_setup)
     m = sub.add_parser("models", help="download model sets onto the pod")
     m.add_argument("sets", nargs="*", help="model set names from models.json")
+    m.add_argument("--profile", help="download a profile's sets instead of naming them")
     m.set_defaults(func=cmd_models)
-    c = sub.add_parser("connect", help="tunnel to ComfyUI and sync outputs")
+    c = sub.add_parser("connect", help="tunnel to ComfyUI and sync the sync folder")
     c.add_argument("--open", action="store_true", help="open ComfyUI in the browser once reachable")
     c.set_defaults(func=cmd_connect)
-    sub.add_parser("start", help="launch or reuse a pod, then connect and open the browser"
-                   ).set_defaults(func=cmd_start)
+    st = sub.add_parser("start", help="launch or reuse a pod, then connect and open the browser")
+    st.add_argument("--profile", help="model profile from config.json (default: default)")
+    st.set_defaults(func=cmd_start)
     sub.add_parser("status", help="show the pod").set_defaults(func=cmd_status)
     s = sub.add_parser("ssh", help="shell on the pod")
     s.add_argument("command", nargs=argparse.REMAINDER)
