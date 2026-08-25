@@ -36,15 +36,28 @@ inputs, outputs and workflows synced to a local folder.
 
 ## Usage
 
-On Windows, double-click **`start.cmd`**: it launches a pod (or reuses a
-running one), sets everything up, opens ComfyUI in the browser and keeps
-syncing outputs. Press Ctrl+C in that window to stop syncing; it offers to
-terminate the pod. **`stop.cmd`** copies anything unsaved and terminates the
-pod. Closing the window without stopping leaves the pod running and billing.
+Double-click **`dashboard.cmd`** (or run `python dashboard.py`). It opens a
+local dashboard at `http://localhost:8287` (`dashboard_port` in `config.json`),
+served only to this machine, that does everything from the browser:
+
+- **Launch pod** with the chosen model profile: launches a pod (or reuses a
+  running one), sets it up, downloads the models and starts syncing, showing
+  each step live. **Open ComfyUI** appears once ComfyUI answers.
+- **Stop sync** closes the tunnel and leaves the pod running; **Resume sync**
+  reconnects. **Cancel** during a launch also terminates the half-made pod.
+- **Terminate** copies anything unsaved home, then deletes the pod. If the
+  final copy fails, the pod is kept and you can choose to terminate anyway.
+- The session cost, uptime, live transfers, sync folder counts, the latest
+  outputs and the full command output are shown as they happen.
+
+The dashboard keeps running in the background after its tab is closed;
+double-clicking `dashboard.cmd` again reopens it. The power button in its
+header quits it (syncing stops, a running pod keeps running and billing).
 
 The same from a shell:
 
 ```sh
+python dashboard.py      # the web dashboard
 python rp.py start       # up (if needed) + connect + open the browser
 python rp.py up          # launch, set up, download default models (~71 GB, ~2 min)
 python rp.py connect     # tunnel + sync; open http://localhost:8288
@@ -56,8 +69,8 @@ Other commands: `status`, `ssh [command]`, `setup` (re-run the remote setup),
 
 ## Configuration
 
-- `config.json`: GPU type, cloud type, template, disk size, local port, sync
-  folder, model profiles (`profiles`: name → model sets), the ComfyUI release to pin (`comfyui_version`) and extra
+- `config.json`: GPU type, cloud type, template, disk size, local port,
+  dashboard port, sync folder, model profiles (`profiles`: name → model sets), the ComfyUI release to pin (`comfyui_version`) and extra
   custom nodes (`custom_nodes`, git URLs) installed on each setup.
 - `models.json`: model sets (Hugging Face repo → files). The Comfy-Org repos
   mirror ComfyUI's `models/` layout, so files download straight into place.
