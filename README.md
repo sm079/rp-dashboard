@@ -18,9 +18,13 @@ inputs, outputs and workflows synced to a local folder.
   | `sync/settings/`  | both ways    | ComfyUI settings and keybindings             |
   | `sync/loras/`     | local → pod  | an extra LoRA folder in the pod's RAM        |
 
-  For both-way folders the latest change wins; deletions are not synced. On
-  connect, local files are uploaded first, so a fresh pod gets your workflows
-  and settings.
+  For both-way folders the latest change wins, and deletions are mirrored
+  both ways; deleting a local LoRA removes it from the pod. Outputs are never
+  deleted on either side. Safeguards: a pod restart (which wipes its RAM) is
+  detected and deletes nothing locally, a pod-side deletion must show in two
+  consecutive listings, a locally edited file is never deleted, and a sudden
+  mass deletion on the pod is refused with a warning. On connect, local files
+  are uploaded first, so a fresh pod gets your workflows and settings.
 - Nothing persists on RunPod: models are re-downloaded on each `up`.
 
 ## Requirements
