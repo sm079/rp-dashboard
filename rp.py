@@ -7,6 +7,7 @@ Commands:
   (dashboard.py serves a web UI for start/stop and runs these commands)
   up        launch a pod, run remote setup, download default models
   models    download model sets onto the pod (see models.json)
+  lora      add, list, remove or download LoRAs (CivitAI or Hugging Face links)
   connect   open the SSH tunnel to ComfyUI; sync the local sync folder
   status    show the current pod
   ssh       open an interactive shell on the pod
@@ -24,6 +25,7 @@ import urllib.request
 from pathlib import Path
 
 import events
+import loras
 from events import emit
 
 ROOT = Path(__file__).resolve().parent
@@ -47,19 +49,31 @@ def save_json(path, data):
 CONFIG = load_json(ROOT / "config.json", {})
 
 
-def api_key():
-    key = os.environ.get("RUNPOD_API_KEY")
-    if not key and sys.platform == "win32":
+def user_env(name):
+    """An environment variable, or None. Keys live in env vars, never in files."""
+    value = os.environ.get(name)
+    if not value and sys.platform == "win32":
         # A user env var set after this shell started is only in the registry.
         import winreg
         try:
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as k:
-                key = winreg.QueryValueEx(k, "RUNPOD_API_KEY")[0]
+                value = winreg.QueryValueEx(k, name)[0]
         except OSError:
             pass
+    return value or None
+
+
+def api_key():
+    key = user_env("RUNPOD_API_KEY")
     if not key:
         sys.exit("RUNPOD_API_KEY is not set")
     return key
+
+
+def lora_tokens():
+    """Download keys for loras.sh, named as the script expects them."""
+    keys = {"CIVITAI_TOKEN": user_env("CIVITAI_API_KEY"), "HF_TOKEN": user_env("HF_TOKEN")}
+    return {k: v for k, v in keys.items() if v}
 
 
 def api(method, path, body=None, exit_on_error=True):
@@ -120,12 +134,18 @@ def shlex_quote(s):
     return "'" + s.replace("'", "'\"'\"'") + "'"
 
 
-def ssh_script(pod, script_path, *args):
-    """Pipe a local shell script to bash on the pod."""
+def ssh_script(pod, script_path, *args, secrets=None):
+    """Pipe a local shell script to bash on the pod.
+
+    `secrets` become shell variables at the top of the piped script: never in a
+    command line on either machine, and not exported to the script's children.
+    """
     quoted = " ".join(shlex_quote(a) for a in args)
     cmd = ssh_base(pod, "-o", "BatchMode=yes") + [f"bash -s -- {quoted}"]
-    with open(script_path, "rb") as f:
-        return subprocess.run(cmd, stdin=f).returncode
+    script = Path(script_path).read_bytes()
+    if secrets:
+        script = "".join(f"{k}={shlex_quote(v)}\n" for k, v in secrets.items()).encode() + script
+    return subprocess.run(cmd, input=script).returncode
 
 
 # --- commands ---------------------------------------------------------------
@@ -195,6 +215,8 @@ def cmd_up(args):
         rc = download_models(pod, sets)
         if rc != 0:
             sys.exit(f"Model download failed (exit {rc}); retry with: python rp.py models")
+        record_models(pod, sets)
+        download_loras(pod, sets)
     print("Ready. Next: python rp.py connect")
 
 
@@ -209,6 +231,12 @@ def model_sets(names):
     if unknown:
         sys.exit(f"Unknown model sets: {', '.join(unknown)}. Known: {', '.join(catalog)}")
     return names
+
+
+def record_models(pod, sets):
+    """Note in pod.json which model sets are on the pod (their LoRAs go along)."""
+    pod["models"] = list(dict.fromkeys([*pod.get("models", []), *sets]))
+    save_json(POD_FILE, pod)
 
 
 def disk_gb(sets):
@@ -331,6 +359,78 @@ def download_models(pod, names):
     return ssh_script(pod, ROOT / "remote" / "models.sh", *specs)
 
 
+def download_loras(pod, sets, ids=None):
+    """Download the library's LoRAs for these model sets (or just `ids`) onto the pod.
+
+    The library is read again after each pass, so LoRAs added meanwhile (from the
+    dashboard) are picked up too. Files already on the pod are skipped. Returns the
+    number of LoRAs that failed; a failed LoRA doesn't stop a launch.
+    """
+    done, failed = set(), 0
+    while True:
+        todo = [l for l in loras.load() if l["id"] not in done
+                and (l["id"] in ids if ids else l["set"] in sets)]
+        if not todo:
+            break
+        if not done:
+            emit("phase", name="loras")
+        for i, lora in enumerate(todo, 1):
+            done.add(lora["id"])
+            print(f"[{i}/{len(todo)}] LoRA {lora['name']} -> loras/{lora['set']}/{lora['file']}", flush=True)
+            emit("lora", id=lora["id"], state="downloading")
+            rc = ssh_script(pod, ROOT / "remote" / "loras.sh", lora["set"], lora["file"],
+                            lora["download"], lora["auth"], secrets=lora_tokens())
+            emit("lora", id=lora["id"], state="done" if rc == 0 else "error")
+            if rc != 0:
+                failed += 1
+                print(f"  LoRA {lora['name']} failed (exit {rc})", flush=True)
+    if failed:
+        print(f"{failed} LoRA(s) failed; retry with: python rp.py lora download", flush=True)
+    return failed
+
+
+def cmd_lora(args):
+    catalog = load_json(ROOT / "models.json")
+    if args.action == "list":
+        items = loras.load()
+        for key in catalog:
+            mine = [l for l in items if l["set"] == key]
+            if mine:
+                print(f"{catalog[key].get('name', key)} ({key}):")
+                for l in mine:
+                    version = f" {l['version']}" if l["version"] else ""
+                    print(f"  {l['id']}  {l['name']}{version}  -> loras/{key}/{l['file']}")
+        if not items:
+            print("No LoRAs yet. Add one with: python rp.py lora add <set> <link>")
+    elif args.action == "add":
+        if len(args.args) != 2 or args.args[0] not in catalog:
+            sys.exit(f"Usage: rp.py lora add <set> <link>, with <set> one of: {', '.join(catalog)}")
+        set_key, link = args.args
+        try:
+            lora = loras.add(set_key, link, user_env("CIVITAI_API_KEY"), user_env("HF_TOKEN"))
+        except loras.LoraError as e:
+            sys.exit(str(e))
+        print(f"Added {lora['name']} as loras/{set_key}/{lora['file']}")
+        pod = load_json(POD_FILE)
+        if pod and pod.get("ssh_port") and set_key in pod.get("models", []):
+            sys.exit(1 if download_loras(pod, [], ids=[lora["id"]]) else 0)
+        print(f"It downloads whenever {catalog[set_key].get('name', set_key)} is on the pod.")
+    elif args.action == "remove":
+        if not args.args:
+            sys.exit("Usage: rp.py lora remove <id> [<id> ...] (ids from: rp.py lora list)")
+        for lora_id in args.args:
+            gone = loras.remove(lora_id)
+            print(f"Removed {gone['name']}" if gone else f"No LoRA {lora_id!r}")
+    elif args.action == "download":
+        pod = current_pod()
+        known = {l["id"] for l in loras.load()}
+        unknown = [i for i in args.args if i not in known]
+        if unknown:
+            sys.exit(f"Unknown LoRA ids: {', '.join(unknown)} (see: rp.py lora list)")
+        sets = pod.get("models") or model_sets(None)
+        sys.exit(1 if download_loras(pod, sets, ids=args.args or None) else 0)
+
+
 def cmd_status(args):
     pod = load_json(POD_FILE)
     if not pod:
@@ -388,9 +488,12 @@ def cmd_start(args):
             print(f"Reusing running pod {pod['id']}")
             emit("reuse", pod=pod["id"])
             # The running pod may have been started with other model sets.
-            rc = download_models(pod, model_sets(args.models))
+            sets = model_sets(args.models)
+            rc = download_models(pod, sets)
             if rc != 0:
                 sys.exit(f"Model download failed (exit {rc})")
+            record_models(pod, sets)
+            download_loras(pod, sets)
         else:
             print(f"Recorded pod {pod['id']} is gone; launching a new one")
             POD_FILE.unlink(missing_ok=True)
@@ -428,6 +531,12 @@ def main():
     m.add_argument("sets", nargs="*",
                    help="model set names from models.json (default: default_models in config.json)")
     m.set_defaults(func=cmd_models)
+    lo = sub.add_parser("lora", help="LoRAs from CivitAI or Hugging Face links, per model set",
+                        description="list | add <set> <link> | remove <id>... | download [<id>...] "
+                                    "(default: the LoRAs of the model sets on the pod)")
+    lo.add_argument("action", choices=["list", "add", "remove", "download"])
+    lo.add_argument("args", nargs="*")
+    lo.set_defaults(func=cmd_lora)
     c = sub.add_parser("connect", help="tunnel to ComfyUI and sync the sync folder")
     c.add_argument("--open", action="store_true", help="open ComfyUI in the browser once reachable")
     c.set_defaults(func=cmd_connect)

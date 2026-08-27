@@ -26,6 +26,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 import events
+import loras
 import rp
 from sync import KINDS, port_in_use, skipped
 
@@ -46,6 +47,7 @@ NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 STOP_GRACE = 15
 ERROR_WORDS = re.compile(r"\b(fail(ed|ure)?|error|refused|lost|denied|NOT deleting|Traceback)\b", re.I)
 MODEL_STEP = re.compile(r"^\[(\d+)/(\d+)\]\s+(\S+)")
+PERCENT = re.compile(r"(\d{1,3}(?:\.\d+)?)%\s*$")
 
 
 def python_exe():
@@ -135,6 +137,7 @@ class Job:
         self.then = None          # follow-up after exit: ("down", no_sync) or ("cleanup",)
         self.last_line = ""
         self.last_transient = 0.0
+        self.lora = None          # id of the LoRA being downloaded, for its progress
         env = {**os.environ, "RP_EVENTS": "1", "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}
         HUB.add_log(f"$ rp.py {' '.join(args)}", "cmd")
         self.proc = subprocess.Popen(
@@ -180,9 +183,13 @@ class Job:
         else:
             self.last_line = text.strip()
         m = MODEL_STEP.match(text.strip())
-        if m and self.phase == "models":
+        if m and self.phase in ("models", "loras"):
             self.models = {"i": int(m.group(1)), "n": int(m.group(2)), "repo": m.group(3)}
             self.ctl.changed()
+        if self.lora:
+            m = PERCENT.search(text)  # curl's progress bar
+            if m:
+                self.ctl.on_lora(self.lora, "downloading", pct=float(m.group(1)))
         HUB.add_log(text, replace=transient)
 
     def event(self, ev):
@@ -192,6 +199,12 @@ class Job:
             self.ctl.changed()
             if self.phase == "live":
                 self.ctl.poke_comfy()
+            if self.name == "start" and self.phase in ("connect", "live"):
+                self.ctl.kick_loras()
+        elif kind == "lora":
+            state = ev.get("state")
+            self.lora = ev.get("id") if state == "downloading" else None
+            self.ctl.on_lora(ev.get("id"), state, error=self.last_line)
         elif kind == "reuse":
             self.reusing = True
             self.ctl.changed()
@@ -235,6 +248,8 @@ class Controller:
         saved = (rp.load_json(SELECTION_FILE) or {}).get("models")
         self.models = [m for m in saved or CONFIG.get("default_models", []) if m in MODELS]
         self.files = {"folders": {}, "outputs": [], "today": 0}
+        self.lora_status = {}      # LoRA id -> {"state": queued|downloading|done|error, "pct", "error"}
+        self.lora_job = None       # `rp.py lora download` beside the main job, on a running pod
         self.wake = threading.Event()
         self.rescan = threading.Event()
 
@@ -259,7 +274,8 @@ class Controller:
             pod_view = None
             if pod:
                 pod_view = {"id": pod["id"], "created": pod.get("created"),
-                            "ready": bool(pod.get("ssh_port")), **(self.pod_info or {})}
+                            "ready": bool(pod.get("ssh_port")), "models": pod.get("models", []),
+                            **(self.pod_info or {})}
             return {
                 "state": self.state_name(),
                 "job": self.job.info() if self.job else None,
@@ -273,6 +289,11 @@ class Controller:
                              "size_gb": m.get("size_gb", 0)} for k, m in MODELS.items()],
                 "gpu": CONFIG.get("gpu_type", ""),
                 "transfer": self.transfer,
+                "loras": [{**{k: v for k, v in l.items() if k not in ("download", "auth")},
+                           **self.lora_status.get(l["id"], {})} for l in loras.load()],
+                "lora_keys": {"civitai": bool(rp.user_env("CIVITAI_API_KEY")),
+                              "hf": bool(rp.user_env("HF_TOKEN"))},
+                "lora_busy": bool(self.lora_job),
                 **self.files,
             }
 
@@ -297,6 +318,8 @@ class Controller:
             reusing = bool(pod and pod.get("ssh_port") and (self.pod_info or {}).get("status") == "RUNNING")
             self.models = list(dict.fromkeys(models))
             self.error, self.transfer, self.comfy_up = None, None, False
+            if not reusing:
+                self.lora_status = {}  # a new pod has none yet
             rp.save_json(SELECTION_FILE, {"models": self.models})
             args = ["start", "--models", *self.models] + (["--no-open"] if reusing else [])
             self.job = Job(self, "start", args, reusing=reusing)
@@ -311,6 +334,7 @@ class Controller:
                 return "Nothing to stop."
             if job.phase not in ("connect", "live") and not job.reusing:
                 job.then = ("cleanup",)
+                self.stop_loras()
             job.stop()
         self.changed()
 
@@ -319,6 +343,7 @@ class Controller:
             job = self.job
             if job and job.name == "down":
                 return "Already terminating."
+            self.stop_loras()
             if job:
                 job.then = ("down", no_sync)
                 job.stop()
@@ -338,6 +363,8 @@ class Controller:
         self.job = Job(self, "down", args)
 
     def job_finished(self, job, code):
+        if job is self.lora_job:
+            return self.lora_job_finished(job, code)
         with self.lock:
             if self.job is not job:
                 return
@@ -351,6 +378,7 @@ class Controller:
                 HUB.add_log(f"{job.name} failed (exit {code})", "error")
             elif job.name == "down" and code == 0:
                 self.pod_info = None
+                self.lora_status = {}
                 HUB.add_log("Pod terminated. Nothing is billing.", "ok")
             elif job.name == "start":
                 HUB.add_log("Sync stopped." if job.phase == "live" else "Launch cancelled.", "info")
@@ -363,6 +391,97 @@ class Controller:
                     self.run_down(True)
         self.rescan.set()
         self.wake.set()
+        self.kick_loras()
+        self.changed()
+
+    # --- LoRAs --------------------------------------------------------------
+
+    def lora_pod(self):
+        """The pod, if LoRAs can be downloaded onto it right now."""
+        pod = rp.load_json(rp.POD_FILE)
+        if not pod or not pod.get("ssh_port") or (self.pod_info or {}).get("gone"):
+            return None
+        job = self.job
+        if job:
+            # A launch downloads the library's LoRAs itself, right after the models.
+            ready = job.name == "start" and job.phase in ("connect", "live") and not job.stopping
+        else:
+            ready = (self.pod_info or {}).get("status") == "RUNNING"
+        return pod if ready else None
+
+    def kick_loras(self):
+        """Download library LoRAs that belong on the running pod and weren't tried yet."""
+        with self.lock:
+            if self.lora_job:
+                return
+            pod = self.lora_pod()
+            if not pod:
+                return
+            sets = pod.get("models", [])
+            ids = [l["id"] for l in loras.load() if l["set"] in sets
+                   and self.lora_status.get(l["id"], {}).get("state") in (None, "queued")]
+            if not ids:
+                return
+            for lora_id in ids:
+                self.lora_status[lora_id] = {"state": "queued"}
+            self.lora_job = Job(self, "lora", ["lora", "download", *ids])
+        self.changed()
+
+    def stop_loras(self):
+        if self.lora_job:
+            self.lora_job.stop()
+
+    def lora_job_finished(self, job, code):
+        with self.lock:
+            self.lora_job = None
+            for lora_id in job.args[2:]:
+                if self.lora_status.get(lora_id, {}).get("state") in ("queued", "downloading"):
+                    message = job.last_line if code else "Didn't download"
+                    self.lora_status[lora_id] = {"state": "error", "error": message or f"exit {code}"}
+        self.kick_loras()  # LoRAs added while this one ran
+        self.changed()
+
+    def on_lora(self, lora_id, state, pct=None, error=None):
+        with self.lock:
+            entry = {"state": state}
+            if pct is not None:
+                entry["pct"] = pct
+            if state == "error":
+                entry["error"] = error or "Download failed"
+            self.lora_status[lora_id] = entry
+        self.changed()
+
+    def add_lora(self, set_key, url):
+        if set_key not in MODELS:
+            return "Unknown model set."
+        if not isinstance(url, str) or not url.strip() or len(url) > 2000:
+            return "Paste a CivitAI or Hugging Face link."
+        try:
+            # Looks the link up online; not under the lock, which would stall the page.
+            lora = loras.add(set_key, url, rp.user_env("CIVITAI_API_KEY"), rp.user_env("HF_TOKEN"))
+        except loras.LoraError as e:
+            return str(e)
+        HUB.add_log(f"Added LoRA {lora['name']} for {MODELS[set_key].get('name', set_key)}", "ok")
+        with self.lock:
+            job = self.job
+            if job and job.name == "start" and set_key in self.models and job.phase not in ("connect", "live"):
+                self.lora_status[lora["id"]] = {"state": "queued"}  # the launch fetches it
+        self.kick_loras()
+        self.changed()
+
+    def remove_lora(self, lora_id):
+        gone = loras.remove(lora_id) if isinstance(lora_id, str) else None
+        if not gone:
+            return "That LoRA isn't in the list."
+        with self.lock:
+            self.lora_status.pop(lora_id, None)
+        HUB.add_log(f"Removed LoRA {gone['name']} from the list", "info")
+        self.changed()
+
+    def retry_lora(self, lora_id):
+        with self.lock:
+            self.lora_status.pop(lora_id, None)
+        self.kick_loras()
         self.changed()
 
     def on_transfer(self, ev):
@@ -412,6 +531,8 @@ class Controller:
             if info != self.pod_info or external != self.external_sync:
                 self.pod_info, self.external_sync = info, external
                 self.changed()
+            # Also catches a running pod after a dashboard restart, and LoRAs added from the CLI.
+            self.kick_loras()
             busy = self.job and self.job.name == "start" and self.job.phase != "live"
             self.wake.wait(5 if busy else 15)
             self.wake.clear()
@@ -568,6 +689,12 @@ class Handler(BaseHTTPRequestHandler):
             err = CTL.stop()
         elif path == "/api/terminate":
             err = CTL.terminate(bool(body.get("no_sync")))
+        elif path == "/api/loras/add":
+            err = CTL.add_lora(body.get("set"), body.get("url"))
+        elif path == "/api/loras/remove":
+            err = CTL.remove_lora(body.get("id"))
+        elif path == "/api/loras/retry":
+            err = CTL.retry_lora(body.get("id"))
         elif path == "/api/dismiss":
             CTL.error = None
             CTL.changed()
@@ -617,6 +744,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def quit_dashboard(server):
     """Stop syncing cleanly (the pod keeps running), then shut down."""
+    CTL.stop_loras()
     job = CTL.job
     if job:
         job.then = None
