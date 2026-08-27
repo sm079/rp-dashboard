@@ -31,6 +31,10 @@ inputs, outputs and workflows synced to a local folder.
 
 - Python 3.9+ (standard library only) and the OpenSSH client.
 - `RUNPOD_API_KEY` set in the environment.
+- For LoRAs that need an account: `CIVITAI_API_KEY` (civitai.com → Account
+  settings → API keys) and `HF_TOKEN` (a Hugging Face read token), set the
+  same way, e.g. `setx CIVITAI_API_KEY <key>`. They're read when a link is
+  added or downloaded, so the dashboard needn't restart.
 - An SSH public key added to the RunPod account (Settings → SSH Public Keys);
   the matching private key path goes in `config.json` (`ssh_key`).
 
@@ -50,6 +54,14 @@ served only to this machine, that does everything from the browser:
   reconnects. **Cancel** during a launch also terminates the half-made pod.
 - **Terminate** copies anything unsaved home, then deletes the pod. If the
   final copy fails, the pod is kept and you can choose to terminate anyway.
+- **LoRAs** (header button) keeps a list of LoRAs per model: paste a CivitAI
+  model link (with or without `?modelVersionId=`) or a Hugging Face file link
+  (`…/resolve/main/<name>.safetensors` or the `blob` page) under the model it's
+  for. The name, version, size and trigger words (click to copy) are looked up
+  and remembered. Each launch downloads the LoRAs of the ticked models; on a
+  running pod a new LoRA downloads straight away, with live progress, while
+  syncing carries on. They land in ComfyUI as `loras/<set>/<file>` (e.g.
+  `qwen21/…`), on the pod's disk next to the models.
 - The session cost, uptime, live transfers, sync folder counts, the latest
   outputs and the full command output are shown as they happen.
 
@@ -69,7 +81,9 @@ python rp.py down        # copy anything unsaved, then terminate the pod
 ```
 
 Other commands: `status`, `ssh [command]`, `setup` (re-run the remote setup),
-`models [set ...]` (download extra model sets).
+`models [set ...]` (download extra model sets), and `lora list`,
+`lora add <set> <link>`, `lora remove <id>`, `lora download [<id> ...]` for
+the LoRA list (the same one the dashboard shows, kept in `.state/loras.json`).
 
 ## Configuration
 

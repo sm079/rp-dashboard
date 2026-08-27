@@ -33,6 +33,10 @@
       <div class="conn" id="conn" title="Connection to the local dashboard server">
         <span class="conn-dot"></span><span id="connText">Connecting</span>
       </div>
+      <button class="btn ghost sm" id="openLoras" type="button" aria-haspopup="dialog">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m10 3 7 3.5-7 3.5-7-3.5z"/><path d="m3 10 7 3.5 7-3.5"/><path d="m3 13.5 7 3.5 7-3.5"/></svg>
+        LoRAs<span class="count" id="loraCount"></span>
+      </button>
       <button class="btn ghost sm" id="openFolder" type="button">
         <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M2.5 5.5a1.5 1.5 0 0 1 1.5-1.5h3.6l1.8 2h6.6a1.5 1.5 0 0 1 1.5 1.5v7a1.5 1.5 0 0 1-1.5 1.5H4a1.5 1.5 0 0 1-1.5-1.5z"/></svg>
         Sync folder
@@ -155,6 +159,23 @@
       <button class="btn danger" id="modalOk" type="button">Confirm</button>
     </div>
   </div>
+</div>
+
+<div class="drawer" id="loraDrawer" hidden>
+  <div class="drawer-scrim" data-close></div>
+  <aside class="drawer-panel" role="dialog" aria-modal="true" aria-labelledby="loraTitle">
+    <header class="drawer-head">
+      <div>
+        <h3 id="loraTitle">LoRAs</h3>
+        <p class="muted small">Paste a CivitAI model link or a Hugging Face <span class="mono">.safetensors</span> link under the model it's for. LoRAs download onto the pod with their model; on a running pod, straight away.</p>
+      </div>
+      <button class="btn ghost sm icon" type="button" data-close aria-label="Close">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 5l10 10M15 5 5 15"/></svg>
+      </button>
+    </header>
+    <div class="lora-keys" id="loraKeys"></div>
+    <div class="drawer-body" id="loraSets"></div>
+  </aside>
 </div>
 
 <div class="toasts" id="toasts" aria-live="assertive"></div>

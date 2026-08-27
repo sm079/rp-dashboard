@@ -33,6 +33,10 @@
       const m = s.job.models;
       return `${s.job.detail || "Model sets"}${m ? ` · repo ${m.i} of ${m.n}` : ""}. Straight from Hugging Face to the pod.`;
     }],
+    loras: ["Downloading LoRAs", (s) => {
+      const m = s.job.models;
+      return `${m ? `LoRA ${m.i} of ${m.n}` : "Your saved LoRAs"} for the chosen models, straight to the pod.`;
+    }],
     connect: ["Connecting", () => "Opening the tunnel and uploading local workflows, settings and LoRAs."],
   };
 
@@ -110,9 +114,12 @@
 
   // ---------- requests ----------
 
-  async function post(path, payload = {}) {
-    pending = true;
-    render();
+  // lock: grey out the main controls while the request runs.
+  async function post(path, payload = {}, { lock = true } = {}) {
+    if (lock) {
+      pending = true;
+      render();
+    }
     try {
       const r = await fetch(path, {
         method: "POST",
@@ -126,8 +133,10 @@
       toast("The dashboard server is not responding.", "danger");
       return {};
     } finally {
-      pending = false;
-      render();
+      if (lock) {
+        pending = false;
+        render();
+      }
     }
   }
 
@@ -172,6 +181,7 @@
     renderPod(s);
     renderSync(s);
     renderOutputs(s);
+    renderLoras(s);
   }
 
   function heroCopy(s) {
@@ -329,10 +339,14 @@
       const phase = job && job.name === "down" ? (job.phase || "copy") : "stop";
       current = DOWN_STEPS.findIndex(([k]) => k === phase);
     } else if (s.state === "launching") {
-      current = START_STEPS.findIndex(([k]) => k === job.phase);
+      // LoRAs download as the tail of the Models step.
+      const step = job.phase === "loras" ? "models" : job.phase;
+      current = START_STEPS.findIndex(([k]) => k === step);
       if (current < 0) current = 0;
       if (job.reusing) skipTo = 3;
-      if (job.phase === "models" && job.models) details.models = `${job.models.i}/${job.models.n}`;
+      if (step === "models" && job.models) {
+        details.models = `${job.phase === "loras" ? "LoRA " : ""}${job.models.i}/${job.models.n}`;
+      }
       if (job.phase === "launch" && job.detail === "waiting for a free GPU") details.launch = "waiting";
     } else if (s.state === "live") {
       current = START_STEPS.length - 1;
@@ -718,6 +732,151 @@
     t.onclick = () => { clearTimeout(timer); kill(); };
     while ($("toasts").children.length > 4) $("toasts").firstElementChild.remove();
   }
+
+  // ---------- LoRAs ----------
+
+  const SOURCES = { civitai: "CivitAI", hf: "Hugging Face" };
+
+  // The pod LoRAs can go to right now, if any.
+  function loraPod(s) {
+    const p = s.pod;
+    return p && p.ready && !p.gone && p.status === "RUNNING" ? p : null;
+  }
+
+  function loraState(l, pod) {
+    if (l.state === "downloading") return ["busy", l.pct != null ? `${Math.floor(l.pct)}%` : "Downloading"];
+    if (l.state === "error") return ["danger", "Failed"];
+    if (pod && l.state === "done") return ["ok", "On pod"];
+    // Its model is on the pod, so the dashboard fetches it next.
+    if (l.state === "queued" || (pod && (pod.models || []).includes(l.set))) return ["busy", "Queued"];
+    return ["", "Saved"];
+  }
+
+  function loraSection(m) {
+    const sec = el("section", "lset");
+    sec.dataset.set = m.key;
+    sec.innerHTML = `
+      <header class="lset-head"><h4>${esc(m.name)}</h4><span class="pill"></span></header>
+      <form class="ladd">
+        <input type="url" required spellcheck="false" autocomplete="off"
+          placeholder="https://civitai.com/models/… or https://huggingface.co/…/x.safetensors"
+          aria-label="LoRA link for ${esc(m.name)}">
+        <button class="btn ghost sm" type="submit">Add</button>
+      </form>
+      <p class="lhint muted small"></p>
+      <ul class="lrows"></ul>`;
+    const form = sec.querySelector("form"), input = form.querySelector("input"), btn = form.querySelector("button");
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      const url = input.value.trim();
+      if (!url || btn.disabled) return;
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner"></span><span>Adding</span>';
+      const j = await post("/api/loras/add", { set: m.key, url }, { lock: false });
+      btn.disabled = false;
+      btn.textContent = "Add";
+      if (j.ok) input.value = "";
+      input.focus();
+    };
+    return sec;
+  }
+
+  function loraRow(l, pod) {
+    const li = el("li", "lrow");
+    li.dataset.state = l.state || "";
+    const [tone, label] = loraState(l, pod);
+    const meta = [l.version, l.base, l.size ? human(l.size) : "", SOURCES[l.source]].filter(Boolean).join(" · ");
+    const trig = (l.triggers || []).map((w) => `<button type="button" class="trig" title="Copy trigger word">${esc(w)}</button>`).join("");
+    li.innerHTML = `
+      <div class="lmain">
+        <a class="lname" href="${esc(l.page)}" target="_blank" rel="noopener noreferrer">${esc(l.name)}</a>
+        <div class="lmeta">${esc(meta)}</div>
+        <div class="lfile mono" title="Name in ComfyUI's LoRA list">${esc(l.set)}/${esc(l.file)}</div>
+        ${trig ? `<div class="ltrig">${trig}</div>` : ""}
+        ${l.state === "error" ? `<div class="lerr">${esc(l.error || "Download failed")}</div>` : ""}
+        ${l.state === "downloading" ? `<div class="lbar"><i style="width:${Math.min(100, l.pct || 0)}%"></i></div>` : ""}
+      </div>
+      <div class="lside">
+        <span class="pill" data-tone="${tone}">${esc(label)}</span>
+        <div class="lbtns"></div>
+      </div>`;
+    const btns = li.querySelector(".lbtns");
+    if (l.state === "error" && pod) {
+      const r = button("ghost xs", "Retry", null, () => post("/api/loras/retry", { id: l.id }, { lock: false }));
+      btns.append(r);
+    }
+    const x = button("ghost xs icon", "", "x", () => confirmDialog({
+      title: `Remove ${l.name}?`,
+      body: "It's taken off the list, so new pods won't get it. A copy already on the running pod stays until the pod is terminated.",
+      ok: "Remove",
+      onOk: () => post("/api/loras/remove", { id: l.id }, { lock: false }),
+    }));
+    x.title = "Remove from the list";
+    x.setAttribute("aria-label", `Remove ${l.name}`);
+    btns.append(x);
+    for (const t of li.querySelectorAll(".trig")) {
+      t.onclick = () => navigator.clipboard.writeText(t.textContent)
+        .then(() => toast(`Copied "${t.textContent}"`, "ok", 2000), () => toast("Couldn't copy.", "danger"));
+    }
+    return li;
+  }
+
+  let loraSetsKey = "";
+  let loraListKeys = {};
+  function renderLoras(s) {
+    const all = s.loras || [];
+    $("loraCount").textContent = all.length ? String(all.length) : "";
+    $("openLoras").classList.toggle("busy", all.some((l) => l.state === "downloading" || l.state === "queued"));
+    if ($("loraDrawer").hidden) return;
+
+    const keys = $("loraKeys");
+    const keyHtml = [["civitai", "CivitAI key", "CIVITAI_API_KEY"], ["hf", "Hugging Face token", "HF_TOKEN"]]
+      .map(([k, label, env]) => `<span class="key" data-on="${!!s.lora_keys[k]}" title="${s.lora_keys[k]
+        ? `Read from ${env}` : `Not set. Some LoRAs need it: setx ${env} <key>, then add the link again.`}">${
+        s.lora_keys[k] ? ICONS.check : ICONS.x}${label}<code>${env}</code></span>`).join("");
+    if (keys.innerHTML !== keyHtml) keys.innerHTML = keyHtml;
+
+    const box = $("loraSets");
+    const setsKey = s.catalog.map((m) => m.key).join();
+    if (setsKey !== loraSetsKey) {
+      loraSetsKey = setsKey;
+      loraListKeys = {};
+      box.replaceChildren(...s.catalog.map(loraSection));
+    }
+    const pod = loraPod(s);
+    for (const m of s.catalog) {
+      const sec = box.querySelector(`.lset[data-set="${m.key}"]`);
+      const mine = all.filter((l) => l.set === m.key);
+      const onPod = !!pod && (pod.models || []).includes(m.key);
+      const pill = sec.querySelector(".lset-head .pill");
+      pill.hidden = !pod;
+      pill.dataset.tone = onPod ? "ok" : "";
+      pill.textContent = onPod ? "On pod" : "Not on this pod";
+      sec.querySelector(".lhint").textContent = onPod
+        ? "Added LoRAs download onto the running pod straight away."
+        : `Added LoRAs download when ${m.name} is on a pod.`;
+      const listKey = JSON.stringify([mine, !!pod]);
+      if (loraListKeys[m.key] !== listKey) {
+        loraListKeys[m.key] = listKey;
+        const rows = mine.map((l) => loraRow(l, pod));
+        sec.querySelector(".lrows").replaceChildren(...(rows.length ? rows : [el("li", "lempty muted small", "No LoRAs yet.")]));
+      }
+    }
+  }
+
+  function setDrawer(open) {
+    $("loraDrawer").hidden = !open;
+    if (open) {
+      loraSetsKey = "";  // rebuild with fresh state
+      renderLoras(S);
+      $("loraSets").querySelector("input")?.focus();
+    }
+  }
+  $("openLoras").onclick = () => S && setDrawer(true);
+  for (const c of document.querySelectorAll("#loraDrawer [data-close]")) c.onclick = () => setDrawer(false);
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !$("loraDrawer").hidden && $("modal").hidden) setDrawer(false);
+  });
 
   // ---------- modal ----------
 
