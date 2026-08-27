@@ -101,10 +101,10 @@ the LoRA list (the same one the dashboard shows, kept in `.state/loras.json`).
 |----------|----------------------------------------------------------------|----------|
 | `krea2`  | Krea 2 Turbo + Raw (fp8), Qwen3-VL 4B text encoder, VAE        | ~30 GB   |
 | `h3`     | MiniMax H3 reference-to-video (pruned int8), NVFP4 text encoder, VAEs, ref2v 4-step turbo LoRA, community turbo v4 EMA LoRA | ~42 GB |
-| `qwen21` | Qwen Image 2.1 Turbo (bf16, 8 steps), Qwen3-VL 8B text encoder (int8), VAE, text-to-image and edit prompt enhancers (Qwen3.5 9B, int8), preview decoder | ~43 GB |
+| `qwen21` | Qwen Image 2.1 (bf16), Qwen3-VL 8B text encoder (int8), VAE, text-to-image and edit prompt enhancers (Qwen3.5 9B, int8), preview decoder | ~43 GB |
 
 Qwen Image 2.1: open ComfyUI's **Qwen Image 2.1: Text to Image** or **Image
-Edit** template, pick `qwen_image_2.1_turbo_bf16.safetensors` as the model
-and set 8 steps (CFG stays at 1); the templates point at the base model, which
-isn't downloaded. Turn on `refine_prompt` to rewrite the prompt with the
-matching enhancer first.
+Edit** template and pick `qwen_image_2.1_bf16.safetensors` as the model; the
+templates point at the int8 copy, which isn't downloaded. Their other settings
+(25 steps, CFG 1) suit it as they are. Turn on `refine_prompt` to rewrite the
+prompt with the matching enhancer first.

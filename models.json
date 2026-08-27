@@ -46,11 +46,11 @@
   },
   "qwen21": {
     "name": "Qwen Image 2.1",
-    "description": "Qwen Image 2.1 Turbo (bf16, 8 steps, text to image and editing), Qwen3-VL 8B text encoder (int8), VAE, text-to-image and edit prompt enhancers (Qwen3.5 9B, int8), live-preview decoder",
+    "description": "Qwen Image 2.1 (bf16, text to image and editing), Qwen3-VL 8B text encoder (int8), VAE, text-to-image and edit prompt enhancers (Qwen3.5 9B, int8), live-preview decoder",
     "size_gb": 43.2,
     "files": {
       "Comfy-Org/Qwen-Image-2.1": [
-        "diffusion_models/qwen_image_2.1_turbo_bf16.safetensors",
+        "diffusion_models/qwen_image_2.1_bf16.safetensors",
         "text_encoders/qwen3vl_8b_int8_convrot.safetensors",
         "vae/qwen_image_2.1_vae_bf16.safetensors",
         "text_encoders/qwen3.5_9b_qwen_image_2.1_pe_t2i.int8_convrot.safetensors",
