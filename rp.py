@@ -3,7 +3,7 @@
 
 Commands:
   start     launch (or reuse) a pod, connect, open ComfyUI in the browser
-            (--models krea2 h3 etc. picks the model sets; see models.json)
+            (--models krea2 qwen21 etc. picks the model sets; see models.json)
   (dashboard.py serves a web UI for start/stop and runs these commands)
   up        launch a pod, run remote setup, download default models
   models    download model sets onto the pod (see models.json)
@@ -318,6 +318,7 @@ def download_models(pod, names):
         sys.exit(f"Unknown model sets: {unknown}. Known: {list(catalog)}")
     # A repo maps to a list of paths (repo mirrors ComfyUI's models/ layout) or
     # to {"into": "<models subfolder>", "files": [...]} for repos that don't.
+    # A "repo" may also be an https:// URL base for files not on Hugging Face.
     specs = []
     for name in names:
         for repo, entry in catalog[name]["files"].items():

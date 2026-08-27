@@ -3,6 +3,8 @@
 # Args: one or more "repo::subdir::path1,path2,..." specs. Files go into
 # models/<subdir>; with an empty subdir the repo paths are expected to mirror
 # ComfyUI's models/ layout (diffusion_models/, text_encoders/, vae/, loras/).
+# A repo that is an https:// URL is a plain file host: each path is fetched
+# from <url>/<path>, for files that aren't on Hugging Face.
 set -euo pipefail
 
 COMFY_DIR="$(cat /root/.comfyui_dir 2>/dev/null || true)"
@@ -27,7 +29,16 @@ for spec in "$@"; do
   IFS=',' read -r -a files <<< "${rest#*::}"
   dest="$COMFY_DIR/models${subdir:+/$subdir}"
   echo "[$i/$total] $repo (${#files[@]} files) -> $dest"
-  hf download "$repo" "${files[@]}" --local-dir "$dest"
+  if [[ "$repo" == https://* ]]; then
+    mkdir -p "$dest"
+    for f in "${files[@]}"; do
+      [ -s "$dest/$f" ] && { echo "  $f already downloaded"; continue; }
+      curl -fL --retry 3 --progress-bar -o "$dest/$f.part" "$repo/$f"
+      mv "$dest/$f.part" "$dest/$f"
+    done
+  else
+    hf download "$repo" "${files[@]}" --local-dir "$dest"
+  fi
 done
 
 echo "Models ready in $COMFY_DIR/models"
