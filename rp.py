@@ -143,8 +143,11 @@ def wait_for_ssh(pod_id, timeout=900):
             last = msg
         if ip and port:
             pod = {"id": pod_id, "ip": ip, "ssh_port": port}
-            probe = subprocess.run(ssh_base(pod, "-o", "BatchMode=yes") + ["true"],
-                                   capture_output=True, text=True)
+            try:
+                probe = subprocess.run(ssh_base(pod, "-o", "BatchMode=yes") + ["true"],
+                                       capture_output=True, text=True, timeout=60)
+            except subprocess.TimeoutExpired:
+                probe = subprocess.CompletedProcess([], 255, "", "probe timed out after 60s")
             if probe.returncode == 0:
                 return pod
             err = (probe.stderr.strip().splitlines() or ["(no output)"])[-1]
