@@ -8,15 +8,13 @@
   const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
 
   let S = null;              // latest server snapshot
-  let chosenProfile = null;  // profile picked in the UI
+  let chosenModels = null;   // model set keys picked in the UI
   let pending = false;       // a request is in flight
   let lastBeat = 0;
   let transfer = null, transferAt = 0;
   let follow = true;
   const seenOutputs = new Set();
   let firstOutputs = true;
-
-  const MODEL_NAMES = { krea2: "Krea 2", h3: "MiniMax H3" };
 
   const START_STEPS = [
     ["launch", "GPU"], ["ssh", "Boot"], ["health", "Host check"],
@@ -110,10 +108,6 @@
     return (name || "GPU").replace(/^NVIDIA\s+/i, "").replace(/^GeForce\s+/i, "");
   }
 
-  function profileLabel(models) {
-    return models.map((m) => MODEL_NAMES[m] || m).join(" + ");
-  }
-
   // ---------- requests ----------
 
   async function post(path, payload = {}) {
@@ -138,7 +132,7 @@
   }
 
   const act = {
-    start: () => post("/api/start", { profile: chosenProfile }),
+    start: () => post("/api/start", { models: chosenModels }),
     stop: () => post("/api/stop"),
     cancel: () => {
       if (S.job && S.job.reusing) return act.stop();
@@ -165,6 +159,7 @@
   function render() {
     if (!S) return;
     const s = S;
+    if (!chosenModels) chosenModels = [...s.models];
     if (body.dataset.state !== s.state) {
       const prev = body.dataset.state;
       body.dataset.state = s.state;
@@ -172,7 +167,7 @@
     }
     renderHero(s);
     renderActions(s);
-    renderProfiles(s);
+    renderModels(s);
     renderSteps(s);
     renderPod(s);
     renderSync(s);
@@ -263,7 +258,7 @@
     const list = [];
     switch (s.state) {
       case "idle":
-        list.push(["primary beckon", "Launch pod", "play", act.start, { disabled: busy }]);
+        list.push(["primary beckon", "Launch pod", "play", act.start, { disabled: busy || !chosenModels.length }]);
         break;
       case "launching":
         list.push(job.stopping
@@ -280,7 +275,7 @@
         list.push(["danger", "Terminate", "stop", () => act.terminate(), { disabled: busy || job.stopping }]);
         break;
       case "paused":
-        list.push(["primary", "Resume sync", "resume", act.start, { disabled: busy || s.external_sync }]);
+        list.push(["primary", "Resume sync", "resume", act.start, { disabled: busy || s.external_sync || !chosenModels.length }]);
         list.push(["danger", "Terminate", "stop", () => act.terminate(), { disabled: busy }]);
         break;
       case "stopping":
@@ -294,37 +289,34 @@
     box.replaceChildren(...list.map(([c, l, i, f, o]) => button(c, l, i, f, o)));
   }
 
-  let profilesKey = "";
-  function renderProfiles(s) {
-    if (!chosenProfile) chosenProfile = s.profile;
-    const seg = $("profiles");
-    const key = JSON.stringify(s.profiles);
-    if (key !== profilesKey) {
-      profilesKey = key;
-      seg.replaceChildren(el("span", "seg-thumb"));
-      for (const p of s.profiles) {
-        const models = profileLabel(p.models);
-        const sub = models.toLowerCase() === p.name.toLowerCase() ? "" : `<span class="seg-models">${esc(models)}</span>`;
-        const b = el("button", "", `<span class="seg-name">${esc(p.name)}</span>${sub}`);
+  // One toggle per model set; each set brings its text encoder, VAE and so on.
+  let modelsKey = "";
+  function renderModels(s) {
+    const box = $("models");
+    const key = JSON.stringify(s.catalog);
+    if (key !== modelsKey) {
+      modelsKey = key;
+      box.replaceChildren(...s.catalog.map((m) => {
+        const b = el("button", "chip", `<span class="chip-check">${ICONS.check}</span><span class="chip-name">${esc(m.name)}</span><span class="chip-size mono">${Math.round(m.size_gb)} GB</span>`);
         b.type = "button";
-        b.setAttribute("role", "radio");
-        b.dataset.name = p.name;
-        b.onclick = () => { chosenProfile = p.name; renderProfiles(S); };
-        seg.append(b);
-      }
+        b.dataset.key = m.key;
+        b.title = m.description;
+        b.onclick = () => {
+          const on = !chosenModels.includes(m.key);
+          chosenModels = S.catalog.map((c) => c.key)
+            .filter((k) => (k === m.key ? on : chosenModels.includes(k)));
+          render();
+        };
+        return b;
+      }));
     }
-    seg.classList.toggle("locked", !["idle", "paused"].includes(s.state) || pending);
-    let active = null;
-    for (const b of seg.querySelectorAll("button")) {
-      const on = b.dataset.name === chosenProfile;
-      b.setAttribute("aria-checked", on);
-      if (on) active = b;
-    }
-    const thumb = seg.querySelector(".seg-thumb");
-    if (active) {
-      thumb.style.width = `${active.offsetWidth}px`;
-      thumb.style.transform = `translateX(${active.offsetLeft}px)`;
-    }
+    // While a pod is launching or live, show what it was started with.
+    const editable = ["idle", "paused"].includes(s.state);
+    const shown = editable ? chosenModels : s.models;
+    box.classList.toggle("locked", !editable || pending);
+    for (const b of box.querySelectorAll(".chip")) b.setAttribute("aria-pressed", shown.includes(b.dataset.key));
+    const gb = s.catalog.filter((m) => shown.includes(m.key)).reduce((n, m) => n + m.size_gb, 0);
+    setText($("modelsTotal"), shown.length ? `~${Math.round(gb)} GB` : "Pick at least one", false);
   }
 
   let stepsKey = "";
@@ -801,7 +793,6 @@
     });
   }
 
-  addEventListener("resize", () => S && renderProfiles(S));
   setInterval(() => { tick(); if (S) renderOutputsAges(); }, 1000);
   function renderOutputsAges() {
     for (const t of $("strip").querySelectorAll(".tile")) {
