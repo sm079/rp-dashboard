@@ -3,7 +3,7 @@
 
 Commands:
   start     launch (or reuse) a pod, connect, open ComfyUI in the browser
-            (--profile <name> picks the model sets; see config.json)
+            (--models krea2 h3 etc. picks the model sets; see models.json)
   (dashboard.py serves a web UI for start/stop and runs these commands)
   up        launch a pod, run remote setup, download default models
   models    download model sets onto the pod (see models.json)
@@ -14,6 +14,7 @@ Commands:
 """
 import argparse
 import json
+import math
 import os
 import subprocess
 import sys
@@ -163,10 +164,12 @@ def cmd_up(args):
     existing = load_json(POD_FILE)
     if existing:
         sys.exit(f"A pod is already recorded ({existing['id']}). Use `status`, or `down` first.")
+    # Checked before launching so a typo doesn't cost a pod.
+    sets = [] if args.no_setup or args.no_models else model_sets(args.models)
     attempts = CONFIG.get("launch_attempts", 3)
     timeout = CONFIG.get("launch_timeout_s", 240)
     for attempt in range(1, attempts + 1):
-        pod = launch(args, timeout)
+        pod = launch(args, timeout, disk_gb(sets))
         if pod:
             healthy, detail = health_check(pod)
             print(f"  host check: {detail}", flush=True)
@@ -188,20 +191,31 @@ def cmd_up(args):
     if args.no_setup:
         return
     run_setup(pod)
-    if not args.no_models:
-        rc = download_models(pod, profile_models(args.profile))
+    if sets:
+        rc = download_models(pod, sets)
         if rc != 0:
             sys.exit(f"Model download failed (exit {rc}); retry with: python rp.py models")
     print("Ready. Next: python rp.py connect")
 
 
-def profile_models(name):
-    """Model sets for a profile in config.json ("default" if name is None)."""
-    profiles = CONFIG.get("profiles", {})
-    name = name or "default"
-    if name not in profiles:
-        sys.exit(f"Unknown profile {name!r}. Known: {', '.join(profiles)}")
-    return profiles[name]["models"]
+def model_sets(names):
+    """The named model sets from models.json, or default_models from config.json.
+
+    Each set holds everything its model needs to run (text encoder, VAE, ...).
+    """
+    catalog = load_json(ROOT / "models.json")
+    names = list(dict.fromkeys(names or CONFIG.get("default_models", [])))
+    unknown = [n for n in names if n not in catalog]
+    if unknown:
+        sys.exit(f"Unknown model sets: {', '.join(unknown)}. Known: {', '.join(catalog)}")
+    return names
+
+
+def disk_gb(sets):
+    """Container disk for the template plus the model sets; container_disk_gb is the minimum."""
+    catalog = load_json(ROOT / "models.json")
+    need = sum(catalog[n].get("size_gb", 0) for n in sets) + CONFIG.get("disk_headroom_gb", 30)
+    return max(CONFIG["container_disk_gb"], math.ceil(need / 10) * 10)
 
 
 def health_check(pod):
@@ -232,7 +246,7 @@ def health_check(pod):
     return ssh_s <= limits["ssh_s"] and disk <= limits["disk_write_s"], detail
 
 
-def launch(args, timeout):
+def launch(args, timeout, disk):
     """Create a pod and wait for SSH. Returns the pod, or None if it never came up."""
     body = {
         "name": CONFIG["pod_name"],
@@ -240,7 +254,7 @@ def launch(args, timeout):
         "gpuTypeIds": [args.gpu or CONFIG["gpu_type"]],
         "gpuCount": 1,
         "cloudType": CONFIG["cloud_type"],
-        "containerDiskInGb": CONFIG["container_disk_gb"],
+        "containerDiskInGb": disk,
         "volumeInGb": 0,
         # Large video models are staged in pinned RAM; too little gets ComfyUI OOM-killed.
         "minRAMPerGPU": args.min_ram or CONFIG.get("min_ram_gb", 0),
@@ -294,7 +308,7 @@ def cmd_setup(args):
 
 
 def cmd_models(args):
-    sys.exit(download_models(current_pod(), args.sets or profile_models(args.profile)))
+    sys.exit(download_models(current_pod(), model_sets(args.sets)))
 
 
 def download_models(pod, names):
@@ -310,8 +324,9 @@ def download_models(pod, names):
             into, files = ("", entry) if isinstance(entry, list) else (entry["into"], entry["files"])
             specs.append(f"{repo}::{into}::{','.join(files)}")
     total = sum(catalog[n].get("size_gb", 0) for n in names)
-    print(f"Downloading {', '.join(names)} (~{total:.0f} GB) on the pod")
-    emit("phase", name="models", detail=", ".join(names))
+    label = ", ".join(catalog[n].get("name", n) for n in names)
+    print(f"Downloading {label} (~{total:.0f} GB) on the pod")
+    emit("phase", name="models", detail=label)
     return ssh_script(pod, ROOT / "remote" / "models.sh", *specs)
 
 
@@ -371,8 +386,8 @@ def cmd_start(args):
         if info and info.get("desiredStatus") == "RUNNING" and pod.get("ssh_port"):
             print(f"Reusing running pod {pod['id']}")
             emit("reuse", pod=pod["id"])
-            # The running pod may have been started with another profile.
-            rc = download_models(pod, profile_models(args.profile))
+            # The running pod may have been started with other model sets.
+            rc = download_models(pod, model_sets(args.models))
             if rc != 0:
                 sys.exit(f"Model download failed (exit {rc})")
         else:
@@ -381,7 +396,7 @@ def cmd_start(args):
             pod = None
     if not pod:
         cmd_up(argparse.Namespace(gpu=None, min_ram=None, no_setup=False, no_models=False,
-                                  profile=args.profile))
+                                  models=args.models))
     from sync import run_connect
     run_connect(current_pod(), CONFIG, ssh_base, ROOT, open_browser=not args.no_open)
     if events.ENABLED:
@@ -403,19 +418,21 @@ def main():
     up.add_argument("--gpu", help="override the GPU type id from config.json")
     up.add_argument("--min-ram", type=int, help="override min_ram_gb from config.json")
     up.add_argument("--no-setup", action="store_true", help="only launch; skip setup and models")
-    up.add_argument("--no-models", action="store_true", help="skip downloading the profile's models")
-    up.add_argument("--profile", help="model profile from config.json (default: default)")
+    up.add_argument("--no-models", action="store_true", help="skip downloading models")
+    up.add_argument("--models", nargs="+", metavar="SET",
+                    help="model sets from models.json (default: default_models in config.json)")
     up.set_defaults(func=cmd_up)
     sub.add_parser("setup", help="re-run the remote setup").set_defaults(func=cmd_setup)
     m = sub.add_parser("models", help="download model sets onto the pod")
-    m.add_argument("sets", nargs="*", help="model set names from models.json")
-    m.add_argument("--profile", help="download a profile's sets instead of naming them")
+    m.add_argument("sets", nargs="*",
+                   help="model set names from models.json (default: default_models in config.json)")
     m.set_defaults(func=cmd_models)
     c = sub.add_parser("connect", help="tunnel to ComfyUI and sync the sync folder")
     c.add_argument("--open", action="store_true", help="open ComfyUI in the browser once reachable")
     c.set_defaults(func=cmd_connect)
     st = sub.add_parser("start", help="launch or reuse a pod, then connect and open the browser")
-    st.add_argument("--profile", help="model profile from config.json (default: default)")
+    st.add_argument("--models", nargs="+", metavar="SET",
+                    help="model sets from models.json (default: default_models in config.json)")
     st.add_argument("--no-open", action="store_true", help="don't open ComfyUI in the browser")
     st.set_defaults(func=cmd_start)
     sub.add_parser("status", help="show the pod").set_defaults(func=cmd_status)

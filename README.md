@@ -40,9 +40,12 @@ Double-click **`dashboard.cmd`** (or run `python dashboard.py`). It opens a
 local dashboard at `http://localhost:8287` (`dashboard_port` in `config.json`),
 served only to this machine, that does everything from the browser:
 
-- **Launch pod** with the chosen model profile: launches a pod (or reuses a
-  running one), sets it up, downloads the models and starts syncing, showing
-  each step live. **Open ComfyUI** appears once ComfyUI answers.
+- **Launch pod** with the model sets ticked under **Models**: launches a pod
+  (or reuses a running one), sets it up, downloads the models and starts
+  syncing, showing each step live. **Open ComfyUI** appears once ComfyUI
+  answers. Each set brings everything its model needs (text encoder, VAE and
+  so on), and the last choice is remembered. Ticking another set while the pod
+  is paused downloads it on **Resume sync**.
 - **Stop sync** closes the tunnel and leaves the pod running; **Resume sync**
   reconnects. **Cancel** during a launch also terminates the half-made pod.
 - **Terminate** copies anything unsaved home, then deletes the pod. If the
@@ -59,6 +62,7 @@ The same from a shell:
 ```sh
 python dashboard.py      # the web dashboard
 python rp.py start       # up (if needed) + connect + open the browser
+python rp.py start --models krea2 h3
 python rp.py up          # launch, set up, download default models (~71 GB, ~2 min)
 python rp.py connect     # tunnel + sync; open http://localhost:8288
 python rp.py down        # copy anything unsaved, then terminate the pod
@@ -70,10 +74,14 @@ Other commands: `status`, `ssh [command]`, `setup` (re-run the remote setup),
 ## Configuration
 
 - `config.json`: GPU type, cloud type, template, disk size, local port,
-  dashboard port, sync folder, model profiles (`profiles`: name → model sets), the ComfyUI release to pin (`comfyui_version`) and extra
-  custom nodes (`custom_nodes`, git URLs) installed on each setup.
-- `models.json`: model sets (Hugging Face repo → files). The Comfy-Org repos
-  mirror ComfyUI's `models/` layout, so files download straight into place.
+  dashboard port, sync folder, the model sets used when none are chosen
+  (`default_models`), the ComfyUI release to pin (`comfyui_version`) and extra
+  custom nodes (`custom_nodes`, git URLs) installed on each setup. The
+  container disk grows past `container_disk_gb` when the chosen sets need more
+  (their size plus `disk_headroom_gb`, default 30).
+- `models.json`: model sets (display name, Hugging Face repo → files), each
+  with everything its model needs. The Comfy-Org repos mirror ComfyUI's
+  `models/` layout, so files download straight into place.
 
 | Set      | Contents                                                       | Size     |
 |----------|----------------------------------------------------------------|----------|

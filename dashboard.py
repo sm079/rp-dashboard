@@ -32,6 +32,9 @@ from sync import KINDS, port_in_use, skipped
 ROOT = rp.ROOT
 WEB = ROOT / "web"
 CONFIG = rp.CONFIG
+MODELS = rp.load_json(ROOT / "models.json", {})
+# The model sets picked last time, preselected on the next start.
+SELECTION_FILE = rp.STATE_DIR / "dashboard.json"
 PORT = CONFIG.get("dashboard_port", 8287)
 COMFY_PORT = CONFIG.get("local_port", 8288)
 SYNC_DIR = (ROOT / CONFIG.get("sync_dir", "sync")).resolve()
@@ -229,7 +232,8 @@ class Controller:
         self.comfy_up = False
         self.external_sync = False
         self.transfer = None
-        self.profile = CONFIG.get("dashboard_profile", "default")
+        saved = (rp.load_json(SELECTION_FILE) or {}).get("models")
+        self.models = [m for m in saved or CONFIG.get("default_models", []) if m in MODELS]
         self.files = {"folders": {}, "outputs": [], "today": 0}
         self.wake = threading.Event()
         self.rescan = threading.Event()
@@ -264,9 +268,9 @@ class Controller:
                 "comfy_url": f"http://localhost:{COMFY_PORT}/",
                 "external_sync": self.external_sync,
                 "error": self.error,
-                "profile": self.profile,
-                "profiles": [{"name": n, "models": p.get("models", [])}
-                             for n, p in CONFIG.get("profiles", {}).items()],
+                "models": self.models,
+                "catalog": [{"key": k, "name": m.get("name", k), "description": m.get("description", ""),
+                             "size_gb": m.get("size_gb", 0)} for k, m in MODELS.items()],
                 "gpu": CONFIG.get("gpu_type", ""),
                 "transfer": self.transfer,
                 **self.files,
@@ -277,19 +281,24 @@ class Controller:
 
     # --- actions ----------------------------------------------------------
 
-    def start(self, profile):
+    def start(self, models):
         with self.lock:
             if self.job:
                 return "Something is already running."
-            if profile not in CONFIG.get("profiles", {}):
-                return f"Unknown profile {profile!r}."
+            if not isinstance(models, list) or not models:
+                return "Pick at least one model."
+            unknown = [str(m) for m in models if not isinstance(m, str) or m not in MODELS]
+            if unknown:
+                return f"Unknown model sets: {', '.join(unknown)}."
             if port_in_use(COMFY_PORT):
                 return (f"Port {COMFY_PORT} is in use, probably by a sync running in a terminal. "
                         "Stop that one first.")
             pod = rp.load_json(rp.POD_FILE)
             reusing = bool(pod and pod.get("ssh_port") and (self.pod_info or {}).get("status") == "RUNNING")
-            self.profile, self.error, self.transfer, self.comfy_up = profile, None, None, False
-            args = ["start", "--profile", profile] + (["--no-open"] if reusing else [])
+            self.models = list(dict.fromkeys(models))
+            self.error, self.transfer, self.comfy_up = None, None, False
+            rp.save_json(SELECTION_FILE, {"models": self.models})
+            args = ["start", "--models", *self.models] + (["--no-open"] if reusing else [])
             self.job = Job(self, "start", args, reusing=reusing)
         self.changed()
         self.wake.set()
@@ -554,7 +563,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_error(400)
         path = urlparse(self.path).path
         if path == "/api/start":
-            err = CTL.start(body.get("profile") or CTL.profile)
+            err = CTL.start(body.get("models", CTL.models))
         elif path == "/api/stop":
             err = CTL.stop()
         elif path == "/api/terminate":
