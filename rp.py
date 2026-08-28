@@ -17,6 +17,7 @@ import argparse
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 import time
@@ -300,7 +301,10 @@ def launch(args, timeout, disk):
             break
         except urllib.error.HTTPError as e:
             detail = getattr(e, "detail", "")
-            if "no instances currently available" not in detail or time.time() - start > wait_s:
+            # RunPod words this two ways: "no instances currently available" and
+            # "There are no longer any instances available".
+            no_capacity = re.search(r"no (longer any|instances currently) (instances )?available", detail)
+            if not no_capacity or time.time() - start > wait_s:
                 sys.exit(f"RunPod API POST /pods failed: {e.code} {detail}")
             print(f"  no {body['gpuTypeIds'][0]} available yet; retrying "
                   f"({int(time.time() - start)}s of {wait_s}s)", flush=True)
