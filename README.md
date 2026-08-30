@@ -35,6 +35,9 @@ inputs, outputs and workflows synced to a local folder.
   settings → API keys) and `HF_TOKEN` (a Hugging Face read token), set the
   same way, e.g. `setx CIVITAI_API_KEY <key>`. They're read when a link is
   added or downloaded, so the dashboard needn't restart.
+- For `klein9b`: `HF_TOKEN` too, with the FLUX.2 [klein] license accepted on
+  the `black-forest-labs/FLUX.2-klein-9b-fp8` Hugging Face page (the repo is
+  gated).
 - An SSH public key added to the RunPod account (Settings → SSH Public Keys);
   the matching private key path goes in `config.json` (`ssh_key`).
 
@@ -87,7 +90,9 @@ the LoRA list (the same one the dashboard shows, kept in `.state/loras.json`).
 
 ## Configuration
 
-- `config.json`: GPU type, cloud type, template, disk size, local port,
+- `config.json`: GPU type (`gpu_type`, the default) and the GPUs to choose
+  from (`gpu_types`: `4090`, `5090`, `pro6000`; pick one in the dashboard or
+  with `rp.py start --gpu pro6000`), cloud type, template, disk size, local port,
   dashboard port, sync folder, the model sets used when none are chosen
   (`default_models`), the ComfyUI release to pin (`comfyui_version`) and extra
   custom nodes (`custom_nodes`, git URLs) installed on each setup. The
@@ -102,6 +107,7 @@ the LoRA list (the same one the dashboard shows, kept in `.state/loras.json`).
 | `krea2`  | Krea 2 Turbo + Raw (fp8), Qwen3-VL 4B text encoder, VAE        | ~30 GB   |
 | `h3`     | MiniMax H3 reference-to-video (pruned int8), NVFP4 text encoder, VAEs, ref2v 4-step turbo LoRA, community turbo v4 EMA LoRA | ~42 GB |
 | `qwen21` | Qwen Image 2.1 (bf16), Qwen3-VL 8B text encoder (int8), VAE, text-to-image and edit prompt enhancers (Qwen3.5 9B, int8), preview decoder | ~43 GB |
+| `klein9b` | FLUX.2 [klein] 9B distilled (4-step, fp8), Qwen3 8B text encoder (fp8 mixed), FLUX.2 VAE, preview decoder | ~18 GB |
 
 Qwen Image 2.1: open ComfyUI's **Qwen Image 2.1: Text to Image** or **Image
 Edit** template and pick `qwen_image_2.1_bf16.safetensors` as the model; the
