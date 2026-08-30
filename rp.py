@@ -309,7 +309,7 @@ def launch(args, timeout, disk):
             print(f"  no {body['gpuTypeIds'][0]} available yet; retrying "
                   f"({int(time.time() - start)}s of {wait_s}s)", flush=True)
             emit("phase", name="launch", detail="waiting for a free GPU")
-            time.sleep(10)
+            time.sleep(30)
     pod_id = created["id"]
     print(f"Pod {pod_id} created, ${created.get('costPerHr', '?')}/hr. Waiting for SSH...", flush=True)
     emit("phase", name="ssh", detail=pod_id)
