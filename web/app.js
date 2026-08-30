@@ -9,6 +9,7 @@
 
   let S = null;              // latest server snapshot
   let chosenModels = null;   // model set keys picked in the UI
+  let chosenGpu = null;      // gpu_types key picked in the UI
   let pending = false;       // a request is in flight
   let lastBeat = 0;
   let transfer = null, transferAt = 0;
@@ -109,7 +110,8 @@
   }
 
   function shortGpu(name) {
-    return (name || "GPU").replace(/^NVIDIA\s+/i, "").replace(/^GeForce\s+/i, "");
+    return (name || "GPU").replace(/^NVIDIA\s+/i, "").replace(/^GeForce\s+/i, "")
+      .replace(/\s+Blackwell.*$/i, "");
   }
 
   // ---------- requests ----------
@@ -141,7 +143,7 @@
   }
 
   const act = {
-    start: () => post("/api/start", { models: chosenModels }),
+    start: () => post("/api/start", { models: chosenModels, gpu: chosenGpu }),
     stop: () => post("/api/stop"),
     cancel: () => {
       if (S.job && S.job.reusing) return act.stop();
@@ -169,6 +171,7 @@
     if (!S) return;
     const s = S;
     if (!chosenModels) chosenModels = [...s.models];
+    if (!chosenGpu) chosenGpu = s.gpu_key;
     if (body.dataset.state !== s.state) {
       const prev = body.dataset.state;
       body.dataset.state = s.state;
@@ -177,6 +180,7 @@
     renderHero(s);
     renderActions(s);
     renderModels(s);
+    renderGpus(s);
     renderSteps(s);
     renderPod(s);
     renderSync(s);
@@ -329,6 +333,31 @@
     setText($("modelsTotal"), shown.length ? `~${Math.round(gb)} GB` : "Pick at least one", false);
   }
 
+  // One GPU for a new pod; a running pod keeps the one it has.
+  let gpusKey = "";
+  function renderGpus(s) {
+    const box = $("gpus");
+    const key = JSON.stringify(s.gpus);
+    if (key !== gpusKey) {
+      gpusKey = key;
+      box.replaceChildren(...s.gpus.map((g) => {
+        const b = el("button", "chip", `<span class="chip-name">${esc(shortGpu(g.id))}</span>`);
+        b.type = "button";
+        b.dataset.key = g.key;
+        b.title = g.id;
+        b.onclick = () => {
+          chosenGpu = g.key;
+          render();
+        };
+        return b;
+      }));
+    }
+    const editable = s.state === "idle";
+    const shown = editable ? chosenGpu : s.gpu_key;
+    box.classList.toggle("locked", !editable || pending);
+    for (const b of box.querySelectorAll(".chip")) b.setAttribute("aria-pressed", b.dataset.key === shown);
+  }
+
   let stepsKey = "";
   function renderSteps(s) {
     const job = s.job;
@@ -391,7 +420,8 @@
     setText(pill, label, false);
     $("rate").textContent = p && p.cost_per_hr ? `$${Number(p.cost_per_hr).toFixed(2)} / hr` : "— / hr";
     const gpu = $("gpu");
-    gpu.textContent = p && p.gpu_name ? shortGpu(p.gpu_name) : `${shortGpu(s.gpu)}`;
+    const picked = s.state === "idle" && (s.gpus.find((g) => g.key === chosenGpu) || {}).id;
+    gpu.textContent = p && p.gpu_name ? shortGpu(p.gpu_name) : shortGpu(picked || s.gpu);
     gpu.classList.toggle("dim", !(p && p.gpu_name));
     const host = $("host");
     const bits = [];

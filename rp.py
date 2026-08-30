@@ -3,7 +3,8 @@
 
 Commands:
   start     launch (or reuse) a pod, connect, open ComfyUI in the browser
-            (--models krea2 qwen21 etc. picks the model sets; see models.json)
+            (--models krea2 qwen21 etc. picks the model sets; see models.json,
+            --gpu 4090 / 5090 / pro6000 the GPU; see gpu_types in config.json)
   (dashboard.py serves a web UI for start/stop and runs these commands)
   up        launch a pod, run remote setup, download default models
   models    download model sets onto the pod (see models.json)
@@ -187,6 +188,7 @@ def cmd_up(args):
         sys.exit(f"A pod is already recorded ({existing['id']}). Use `status`, or `down` first.")
     # Checked before launching so a typo doesn't cost a pod.
     sets = [] if args.no_setup or args.no_models else model_sets(args.models)
+    args.gpu = gpu_type(args.gpu)
     attempts = CONFIG.get("launch_attempts", 3)
     timeout = CONFIG.get("launch_timeout_s", 240)
     for attempt in range(1, attempts + 1):
@@ -219,6 +221,14 @@ def cmd_up(args):
         record_models(pod, sets)
         download_loras(pod, sets)
     print("Ready. Next: python rp.py connect")
+
+
+def gpu_type(name):
+    """The RunPod GPU type id for a gpu_types alias (e.g. 5090) or a full id; default gpu_type."""
+    if not name:
+        return CONFIG["gpu_type"]
+    aliases = CONFIG.get("gpu_types", {})
+    return aliases.get(name, name)
 
 
 def model_sets(names):
@@ -280,7 +290,7 @@ def launch(args, timeout, disk):
     body = {
         "name": CONFIG["pod_name"],
         "templateId": CONFIG["template_id"],
-        "gpuTypeIds": [args.gpu or CONFIG["gpu_type"]],
+        "gpuTypeIds": [args.gpu],
         "gpuCount": 1,
         "cloudType": CONFIG["cloud_type"],
         "containerDiskInGb": disk,
@@ -506,7 +516,7 @@ def cmd_start(args):
             POD_FILE.unlink(missing_ok=True)
             pod = None
     if not pod:
-        cmd_up(argparse.Namespace(gpu=None, min_ram=None, no_setup=False, no_models=False,
+        cmd_up(argparse.Namespace(gpu=args.gpu, min_ram=None, no_setup=False, no_models=False,
                                   models=args.models))
     from sync import run_connect
     run_connect(current_pod(), CONFIG, ssh_base, ROOT, open_browser=not args.no_open)
@@ -526,7 +536,8 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
     up = sub.add_parser("up", help="launch a pod")
-    up.add_argument("--gpu", help="override the GPU type id from config.json")
+    up.add_argument("--gpu", help="GPU alias from gpu_types in config.json (4090, 5090, pro6000) "
+                                  "or a RunPod GPU type id (default: gpu_type)")
     up.add_argument("--min-ram", type=int, help="override min_ram_gb from config.json")
     up.add_argument("--no-setup", action="store_true", help="only launch; skip setup and models")
     up.add_argument("--no-models", action="store_true", help="skip downloading models")
@@ -550,6 +561,8 @@ def main():
     st = sub.add_parser("start", help="launch or reuse a pod, then connect and open the browser")
     st.add_argument("--models", nargs="+", metavar="SET",
                     help="model sets from models.json (default: default_models in config.json)")
+    st.add_argument("--gpu", help="GPU for a new pod: alias from gpu_types in config.json "
+                                  "(4090, 5090, pro6000) or a RunPod GPU type id (default: gpu_type)")
     st.add_argument("--no-open", action="store_true", help="don't open ComfyUI in the browser")
     st.set_defaults(func=cmd_start)
     sub.add_parser("status", help="show the pod").set_defaults(func=cmd_status)

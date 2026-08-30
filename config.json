@@ -1,6 +1,11 @@
 {
   "template_id": "cw3nka7d08",
   "gpu_type": "NVIDIA GeForce RTX 5090",
+  "gpu_types": {
+    "4090": "NVIDIA GeForce RTX 4090",
+    "5090": "NVIDIA GeForce RTX 5090",
+    "pro6000": "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+  },
   "cloud_type": "SECURE",
   "container_disk_gb": 150,
   "min_ram_gb": 0,
