@@ -19,8 +19,9 @@
 
   const START_STEPS = [
     ["launch", "GPU"], ["ssh", "Boot"], ["health", "Host check"],
-    ["setup", "Setup"], ["models", "Models"], ["connect", "Sync"],
+    ["setup", "Setup"], ["connect", "Sync"], ["models", "Models"],
   ];
+  const SYNC_STEP = START_STEPS.findIndex(([k]) => k === "connect");
   const DOWN_STEPS = [["stop", "Stop sync"], ["copy", "Save outputs"], ["terminate", "Terminate"]];
 
   const PHASE_COPY = {
@@ -30,14 +31,6 @@
     ssh: ["Booting the pod", () => "Waiting for the container to start and accept SSH."],
     health: ["Checking the host", () => "Timing SSH and disk writes to skip an overloaded machine."],
     setup: ["Setting up ComfyUI", () => "Pinning the release, moving user folders to RAM, binding to localhost."],
-    models: ["Downloading models", (s) => {
-      const m = s.job.models;
-      return `${s.job.detail || "Model sets"}${m ? ` · repo ${m.i} of ${m.n}` : ""}. Straight from Hugging Face to the pod.`;
-    }],
-    loras: ["Downloading LoRAs", (s) => {
-      const m = s.job.models;
-      return `${m ? `LoRA ${m.i} of ${m.n}` : "Your saved LoRAs"} for the chosen models, straight to the pod.`;
-    }],
     connect: ["Connecting", () => "Opening the tunnel and uploading local workflows, settings and LoRAs."],
   };
 
@@ -107,6 +100,11 @@
     if (d < 3600) return `${Math.floor(d / 60)} min ago`;
     if (d < 86400) return `${Math.floor(d / 3600)} h ago`;
     return `${Math.floor(d / 86400)} d ago`;
+  }
+
+  // A start's model and LoRA downloads, which run while ComfyUI is in use.
+  function downloading(job) {
+    return !!(job && job.download && ["start", "models", "loras"].includes(job.download.state));
   }
 
   function shortGpu(name) {
@@ -198,6 +196,14 @@
       }
       case "live":
         if (job.stopping) return ["Live", "Stopping sync", "Closing the tunnel. The pod keeps running."];
+        if (s.comfy && downloading(job)) {
+          const m = job.models;
+          const what = job.download.state === "loras"
+            ? (m ? `LoRA ${m.i} of ${m.n}` : "LoRAs")
+            : `${job.download.detail || "Models"}${m ? ` · repo ${m.i} of ${m.n}` : ""}`;
+          return ["Live", "Ready · downloading models",
+            `ComfyUI is at localhost:${new URL(s.comfy_url).port}. Still downloading ${what}; press R in ComfyUI once they're done.`];
+        }
         return s.comfy
           ? ["Live", "Ready", `ComfyUI is at localhost:${new URL(s.comfy_url).port}. Files sync both ways every 3 s.`]
           : ["Live", "Starting ComfyUI", "The tunnel is up. Waiting for ComfyUI to answer on the pod."];
@@ -368,23 +374,28 @@
       const phase = job && job.name === "down" ? (job.phase || "copy") : "stop";
       current = DOWN_STEPS.findIndex(([k]) => k === phase);
     } else if (s.state === "launching") {
-      // LoRAs download as the tail of the Models step.
-      const step = job.phase === "loras" ? "models" : job.phase;
-      current = START_STEPS.findIndex(([k]) => k === step);
+      current = START_STEPS.findIndex(([k]) => k === job.phase);
       if (current < 0) current = 0;
       if (job.reusing) skipTo = 3;
-      if (step === "models" && job.models) {
-        details.models = `${job.phase === "loras" ? "LoRA " : ""}${job.models.i}/${job.models.n}`;
-      }
       if (job.phase === "launch" && job.detail === "waiting for a free GPU") details.launch = "waiting";
     } else if (s.state === "live") {
-      current = START_STEPS.length - 1;
+      current = SYNC_STEP;
       live = true;
       details.connect = s.comfy ? "live" : "tunnel up";
       if (job && job.reusing) skipTo = 3;
     } else if (s.state === "paused") {
-      current = START_STEPS.length - 1;
+      current = SYNC_STEP;
       details.connect = "off";
+    }
+    // Models (and LoRAs) download after Sync, while ComfyUI is already usable.
+    const dl = s.state === "live" && job && job.download ? job.download.state : null;
+    if (downloading(job) && s.state === "live") {
+      const m = job.models;
+      details.models = m ? `${dl === "loras" ? "LoRA " : ""}${m.i}/${m.n}` : "starting";
+    } else if (dl === "error") {
+      details.models = "failed";
+    } else if (dl === "stopped") {
+      details.models = "stopped";
     }
     const ol = $("steps");
     const key = defs.map(([k]) => k).join();
@@ -399,8 +410,12 @@
     [...ol.children].forEach((li, i) => {
       const skip = i <= skipTo;
       const paused = s.state === "paused" && i === current;
-      li.className = "step" + (skip ? " skip" : i < current ? " done"
-        : i === current ? (live ? " live done" : paused ? "" : " active") : "");
+      let cls = skip ? " skip" : i < current ? " done"
+        : i === current ? (live ? " live done" : paused ? "" : " active") : "";
+      if (li.dataset.key === "models" && dl) {
+        cls = downloading(job) ? " active" : dl === "done" ? " done" : "";
+      }
+      li.className = "step" + cls;
       const det = details[li.dataset.key] || (skip ? "reused" : "");
       li.querySelector(".det").textContent = det;
     });

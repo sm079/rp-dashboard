@@ -48,9 +48,11 @@ local dashboard at `http://localhost:8287` (`dashboard_port` in `config.json`),
 served only to this machine, that does everything from the browser:
 
 - **Launch pod** with the model sets ticked under **Models**: launches a pod
-  (or reuses a running one), sets it up, downloads the models and starts
-  syncing, showing each step live. **Open ComfyUI** appears once ComfyUI
-  answers. Each set brings everything its model needs (text encoder, VAE and
+  (or reuses a running one), sets it up and starts syncing, showing each step
+  live. **Open ComfyUI** appears once ComfyUI answers; the models and LoRAs
+  keep downloading meanwhile (the **Models** step), and pressing R in ComfyUI
+  lists them once they're done. Stopping the sync stops unfinished downloads,
+  and the next start resumes them. Each set brings everything its model needs (text encoder, VAE and
   so on), and the last choice is remembered. Ticking another set while the pod
   is paused downloads it on **Resume sync**.
 - **Stop sync** closes the tunnel and leaves the pod running; **Resume sync**

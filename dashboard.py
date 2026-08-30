@@ -144,6 +144,7 @@ class Job:
         self.last_line = ""
         self.last_transient = 0.0
         self.lora = None          # id of the LoRA being downloaded, for its progress
+        self.download = None      # background model downloads of a start: {"state", "detail"}
         env = {**os.environ, "RP_EVENTS": "1", "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}
         HUB.add_log(f"$ rp.py {' '.join(args)}", "cmd")
         self.proc = subprocess.Popen(
@@ -189,7 +190,7 @@ class Job:
         else:
             self.last_line = text.strip()
         m = MODEL_STEP.match(text.strip())
-        if m and self.phase in ("models", "loras"):
+        if m and (self.phase in ("models", "loras") or self.downloading()):
             self.models = {"i": int(m.group(1)), "n": int(m.group(2)), "repo": m.group(3)}
             self.ctl.changed()
         if self.lora:
@@ -211,6 +212,14 @@ class Job:
             state = ev.get("state")
             self.lora = ev.get("id") if state == "downloading" else None
             self.ctl.on_lora(ev.get("id"), state, error=self.last_line)
+        elif kind == "download":
+            state = ev.get("state")
+            self.download = {"state": state, "detail": ev.get("detail") or (self.download or {}).get("detail", "")}
+            if state in ("start", "models", "loras"):
+                self.models = None
+            self.ctl.changed()
+            if not self.downloading():
+                self.ctl.kick_loras()
         elif kind == "reuse":
             self.reusing = True
             self.ctl.changed()
@@ -236,10 +245,13 @@ class Job:
                 kill_tree(self.proc.pid)
         threading.Timer(STOP_GRACE, deadline).start()
 
+    def downloading(self):
+        return bool(self.download) and self.download["state"] in ("start", "models", "loras")
+
     def info(self):
         return {"name": self.name, "phase": self.phase, "detail": self.detail,
                 "models": self.models, "started": self.started, "reusing": self.reusing,
-                "stopping": self.stopping}
+                "stopping": self.stopping, "download": self.download}
 
 
 class Controller:
@@ -417,7 +429,8 @@ class Controller:
         job = self.job
         if job:
             # A launch downloads the library's LoRAs itself, right after the models.
-            ready = job.name == "start" and job.phase in ("connect", "live") and not job.stopping
+            ready = (job.name == "start" and job.phase in ("connect", "live") and not job.stopping
+                     and not job.downloading())
         else:
             ready = (self.pod_info or {}).get("status") == "RUNNING"
         return pod if ready else None
@@ -477,7 +490,8 @@ class Controller:
         HUB.add_log(f"Added LoRA {lora['name']} for {MODELS[set_key].get('name', set_key)}", "ok")
         with self.lock:
             job = self.job
-            if job and job.name == "start" and set_key in self.models and job.phase not in ("connect", "live"):
+            if (job and job.name == "start" and set_key in self.models
+                    and (job.phase not in ("connect", "live") or job.downloading())):
                 self.lora_status[lora["id"]] = {"state": "queued"}  # the launch fetches it
         self.kick_loras()
         self.changed()
