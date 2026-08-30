@@ -34,7 +34,8 @@ ROOT = rp.ROOT
 WEB = ROOT / "web"
 CONFIG = rp.CONFIG
 MODELS = rp.load_json(ROOT / "models.json", {})
-# The model sets picked last time, preselected on the next start.
+GPUS = CONFIG.get("gpu_types") or {"default": CONFIG["gpu_type"]}
+# The model sets and GPU picked last time, preselected on the next start.
 SELECTION_FILE = rp.STATE_DIR / "dashboard.json"
 PORT = CONFIG.get("dashboard_port", 8287)
 COMFY_PORT = CONFIG.get("local_port", 8288)
@@ -48,6 +49,11 @@ STOP_GRACE = 15
 ERROR_WORDS = re.compile(r"\b(fail(ed|ure)?|error|refused|lost|denied|NOT deleting|Traceback)\b", re.I)
 MODEL_STEP = re.compile(r"^\[(\d+)/(\d+)\]\s+(\S+)")
 PERCENT = re.compile(r"(\d{1,3}(?:\.\d+)?)%\s*$")
+
+
+def default_gpu():
+    """The gpu_types key for gpu_type in config.json (the first one if it has none)."""
+    return next((k for k, v in GPUS.items() if v == CONFIG["gpu_type"]), next(iter(GPUS)))
 
 
 def python_exe():
@@ -138,6 +144,7 @@ class Job:
         self.last_line = ""
         self.last_transient = 0.0
         self.lora = None          # id of the LoRA being downloaded, for its progress
+        self.download = None      # background model downloads of a start: {"state", "detail"}
         env = {**os.environ, "RP_EVENTS": "1", "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}
         HUB.add_log(f"$ rp.py {' '.join(args)}", "cmd")
         self.proc = subprocess.Popen(
@@ -183,7 +190,7 @@ class Job:
         else:
             self.last_line = text.strip()
         m = MODEL_STEP.match(text.strip())
-        if m and self.phase in ("models", "loras"):
+        if m and (self.phase in ("models", "loras") or self.downloading()):
             self.models = {"i": int(m.group(1)), "n": int(m.group(2)), "repo": m.group(3)}
             self.ctl.changed()
         if self.lora:
@@ -205,6 +212,14 @@ class Job:
             state = ev.get("state")
             self.lora = ev.get("id") if state == "downloading" else None
             self.ctl.on_lora(ev.get("id"), state, error=self.last_line)
+        elif kind == "download":
+            state = ev.get("state")
+            self.download = {"state": state, "detail": ev.get("detail") or (self.download or {}).get("detail", "")}
+            if state in ("start", "models", "loras"):
+                self.models = None
+            self.ctl.changed()
+            if not self.downloading():
+                self.ctl.kick_loras()
         elif kind == "reuse":
             self.reusing = True
             self.ctl.changed()
@@ -230,10 +245,13 @@ class Job:
                 kill_tree(self.proc.pid)
         threading.Timer(STOP_GRACE, deadline).start()
 
+    def downloading(self):
+        return bool(self.download) and self.download["state"] in ("start", "models", "loras")
+
     def info(self):
         return {"name": self.name, "phase": self.phase, "detail": self.detail,
                 "models": self.models, "started": self.started, "reusing": self.reusing,
-                "stopping": self.stopping}
+                "stopping": self.stopping, "download": self.download}
 
 
 class Controller:
@@ -245,8 +263,9 @@ class Controller:
         self.comfy_up = False
         self.external_sync = False
         self.transfer = None
-        saved = (rp.load_json(SELECTION_FILE) or {}).get("models")
-        self.models = [m for m in saved or CONFIG.get("default_models", []) if m in MODELS]
+        saved = rp.load_json(SELECTION_FILE) or {}
+        self.models = [m for m in saved.get("models") or CONFIG.get("default_models", []) if m in MODELS]
+        self.gpu = saved.get("gpu") if saved.get("gpu") in GPUS else default_gpu()
         self.files = {"folders": {}, "outputs": [], "today": 0}
         self.lora_status = {}      # LoRA id -> {"state": queued|downloading|done|error, "pct", "error"}
         self.lora_job = None       # `rp.py lora download` beside the main job, on a running pod
@@ -287,7 +306,9 @@ class Controller:
                 "models": self.models,
                 "catalog": [{"key": k, "name": m.get("name", k), "description": m.get("description", ""),
                              "size_gb": m.get("size_gb", 0)} for k, m in MODELS.items()],
-                "gpu": CONFIG.get("gpu_type", ""),
+                "gpu": GPUS[self.gpu],
+                "gpu_key": self.gpu,
+                "gpus": [{"key": k, "id": v} for k, v in GPUS.items()],
                 "transfer": self.transfer,
                 "loras": [{**{k: v for k, v in l.items() if k not in ("download", "auth")},
                            **self.lora_status.get(l["id"], {})} for l in loras.load()],
@@ -302,12 +323,14 @@ class Controller:
 
     # --- actions ----------------------------------------------------------
 
-    def start(self, models):
+    def start(self, models, gpu):
         with self.lock:
             if self.job:
                 return "Something is already running."
             if not isinstance(models, list) or not models:
                 return "Pick at least one model."
+            if gpu not in GPUS:
+                return f"Unknown GPU: {gpu}."
             unknown = [str(m) for m in models if not isinstance(m, str) or m not in MODELS]
             if unknown:
                 return f"Unknown model sets: {', '.join(unknown)}."
@@ -317,11 +340,13 @@ class Controller:
             pod = rp.load_json(rp.POD_FILE)
             reusing = bool(pod and pod.get("ssh_port") and (self.pod_info or {}).get("status") == "RUNNING")
             self.models = list(dict.fromkeys(models))
+            self.gpu = gpu
             self.error, self.transfer, self.comfy_up = None, None, False
             if not reusing:
                 self.lora_status = {}  # a new pod has none yet
-            rp.save_json(SELECTION_FILE, {"models": self.models})
-            args = ["start", "--models", *self.models] + (["--no-open"] if reusing else [])
+            rp.save_json(SELECTION_FILE, {"models": self.models, "gpu": self.gpu})
+            # The GPU only matters for a new pod; a reused one keeps its own.
+            args = ["start", "--models", *self.models, "--gpu", GPUS[gpu]] + (["--no-open"] if reusing else [])
             self.job = Job(self, "start", args, reusing=reusing)
         self.changed()
         self.wake.set()
@@ -404,7 +429,8 @@ class Controller:
         job = self.job
         if job:
             # A launch downloads the library's LoRAs itself, right after the models.
-            ready = job.name == "start" and job.phase in ("connect", "live") and not job.stopping
+            ready = (job.name == "start" and job.phase in ("connect", "live") and not job.stopping
+                     and not job.downloading())
         else:
             ready = (self.pod_info or {}).get("status") == "RUNNING"
         return pod if ready else None
@@ -464,7 +490,8 @@ class Controller:
         HUB.add_log(f"Added LoRA {lora['name']} for {MODELS[set_key].get('name', set_key)}", "ok")
         with self.lock:
             job = self.job
-            if job and job.name == "start" and set_key in self.models and job.phase not in ("connect", "live"):
+            if (job and job.name == "start" and set_key in self.models
+                    and (job.phase not in ("connect", "live") or job.downloading())):
                 self.lora_status[lora["id"]] = {"state": "queued"}  # the launch fetches it
         self.kick_loras()
         self.changed()
@@ -684,7 +711,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_error(400)
         path = urlparse(self.path).path
         if path == "/api/start":
-            err = CTL.start(body.get("models", CTL.models))
+            err = CTL.start(body.get("models", CTL.models), body.get("gpu", CTL.gpu))
         elif path == "/api/stop":
             err = CTL.stop()
         elif path == "/api/terminate":

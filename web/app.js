@@ -9,6 +9,7 @@
 
   let S = null;              // latest server snapshot
   let chosenModels = null;   // model set keys picked in the UI
+  let chosenGpu = null;      // gpu_types key picked in the UI
   let pending = false;       // a request is in flight
   let lastBeat = 0;
   let transfer = null, transferAt = 0;
@@ -18,8 +19,9 @@
 
   const START_STEPS = [
     ["launch", "GPU"], ["ssh", "Boot"], ["health", "Host check"],
-    ["setup", "Setup"], ["models", "Models"], ["connect", "Sync"],
+    ["setup", "Setup"], ["connect", "Sync"], ["models", "Models"],
   ];
+  const SYNC_STEP = START_STEPS.findIndex(([k]) => k === "connect");
   const DOWN_STEPS = [["stop", "Stop sync"], ["copy", "Save outputs"], ["terminate", "Terminate"]];
 
   const PHASE_COPY = {
@@ -29,14 +31,6 @@
     ssh: ["Booting the pod", () => "Waiting for the container to start and accept SSH."],
     health: ["Checking the host", () => "Timing SSH and disk writes to skip an overloaded machine."],
     setup: ["Setting up ComfyUI", () => "Pinning the release, moving user folders to RAM, binding to localhost."],
-    models: ["Downloading models", (s) => {
-      const m = s.job.models;
-      return `${s.job.detail || "Model sets"}${m ? ` · repo ${m.i} of ${m.n}` : ""}. Straight from Hugging Face to the pod.`;
-    }],
-    loras: ["Downloading LoRAs", (s) => {
-      const m = s.job.models;
-      return `${m ? `LoRA ${m.i} of ${m.n}` : "Your saved LoRAs"} for the chosen models, straight to the pod.`;
-    }],
     connect: ["Connecting", () => "Opening the tunnel and uploading local workflows, settings and LoRAs."],
   };
 
@@ -108,8 +102,14 @@
     return `${Math.floor(d / 86400)} d ago`;
   }
 
+  // A start's model and LoRA downloads, which run while ComfyUI is in use.
+  function downloading(job) {
+    return !!(job && job.download && ["start", "models", "loras"].includes(job.download.state));
+  }
+
   function shortGpu(name) {
-    return (name || "GPU").replace(/^NVIDIA\s+/i, "").replace(/^GeForce\s+/i, "");
+    return (name || "GPU").replace(/^NVIDIA\s+/i, "").replace(/^GeForce\s+/i, "")
+      .replace(/\s+Blackwell\b.*$/i, "");
   }
 
   // ---------- requests ----------
@@ -141,7 +141,7 @@
   }
 
   const act = {
-    start: () => post("/api/start", { models: chosenModels }),
+    start: () => post("/api/start", { models: chosenModels, gpu: chosenGpu }),
     stop: () => post("/api/stop"),
     cancel: () => {
       if (S.job && S.job.reusing) return act.stop();
@@ -169,6 +169,7 @@
     if (!S) return;
     const s = S;
     if (!chosenModels) chosenModels = [...s.models];
+    if (!chosenGpu) chosenGpu = s.gpu_key;
     if (body.dataset.state !== s.state) {
       const prev = body.dataset.state;
       body.dataset.state = s.state;
@@ -177,6 +178,7 @@
     renderHero(s);
     renderActions(s);
     renderModels(s);
+    renderGpus(s);
     renderSteps(s);
     renderPod(s);
     renderSync(s);
@@ -194,6 +196,14 @@
       }
       case "live":
         if (job.stopping) return ["Live", "Stopping sync", "Closing the tunnel. The pod keeps running."];
+        if (s.comfy && downloading(job)) {
+          const m = job.models;
+          const what = job.download.state === "loras"
+            ? (m ? `LoRA ${m.i} of ${m.n}` : "LoRAs")
+            : `${job.download.detail || "Models"}${m ? ` · repo ${m.i} of ${m.n}` : ""}`;
+          return ["Live", "Ready · downloading models",
+            `ComfyUI is at localhost:${new URL(s.comfy_url).port}. Still downloading ${what}; press R in ComfyUI once they're done.`];
+        }
         return s.comfy
           ? ["Live", "Ready", `ComfyUI is at localhost:${new URL(s.comfy_url).port}. Files sync both ways every 3 s.`]
           : ["Live", "Starting ComfyUI", "The tunnel is up. Waiting for ComfyUI to answer on the pod."];
@@ -329,6 +339,31 @@
     setText($("modelsTotal"), shown.length ? `~${Math.round(gb)} GB` : "Pick at least one", false);
   }
 
+  // One GPU for a new pod; a running pod keeps the one it has.
+  let gpusKey = "";
+  function renderGpus(s) {
+    const box = $("gpus");
+    const key = JSON.stringify(s.gpus);
+    if (key !== gpusKey) {
+      gpusKey = key;
+      box.replaceChildren(...s.gpus.map((g) => {
+        const b = el("button", "chip", `<span class="chip-name">${esc(shortGpu(g.id))}</span>`);
+        b.type = "button";
+        b.dataset.key = g.key;
+        b.title = g.id;
+        b.onclick = () => {
+          chosenGpu = g.key;
+          render();
+        };
+        return b;
+      }));
+    }
+    const editable = s.state === "idle";
+    const shown = editable ? chosenGpu : s.gpu_key;
+    box.classList.toggle("locked", !editable || pending);
+    for (const b of box.querySelectorAll(".chip")) b.setAttribute("aria-pressed", b.dataset.key === shown);
+  }
+
   let stepsKey = "";
   function renderSteps(s) {
     const job = s.job;
@@ -339,23 +374,28 @@
       const phase = job && job.name === "down" ? (job.phase || "copy") : "stop";
       current = DOWN_STEPS.findIndex(([k]) => k === phase);
     } else if (s.state === "launching") {
-      // LoRAs download as the tail of the Models step.
-      const step = job.phase === "loras" ? "models" : job.phase;
-      current = START_STEPS.findIndex(([k]) => k === step);
+      current = START_STEPS.findIndex(([k]) => k === job.phase);
       if (current < 0) current = 0;
       if (job.reusing) skipTo = 3;
-      if (step === "models" && job.models) {
-        details.models = `${job.phase === "loras" ? "LoRA " : ""}${job.models.i}/${job.models.n}`;
-      }
       if (job.phase === "launch" && job.detail === "waiting for a free GPU") details.launch = "waiting";
     } else if (s.state === "live") {
-      current = START_STEPS.length - 1;
+      current = SYNC_STEP;
       live = true;
       details.connect = s.comfy ? "live" : "tunnel up";
       if (job && job.reusing) skipTo = 3;
     } else if (s.state === "paused") {
-      current = START_STEPS.length - 1;
+      current = SYNC_STEP;
       details.connect = "off";
+    }
+    // Models (and LoRAs) download after Sync, while ComfyUI is already usable.
+    const dl = s.state === "live" && job && job.download ? job.download.state : null;
+    if (downloading(job) && s.state === "live") {
+      const m = job.models;
+      details.models = m ? `${dl === "loras" ? "LoRA " : ""}${m.i}/${m.n}` : "starting";
+    } else if (dl === "error") {
+      details.models = "failed";
+    } else if (dl === "stopped") {
+      details.models = "stopped";
     }
     const ol = $("steps");
     const key = defs.map(([k]) => k).join();
@@ -370,8 +410,12 @@
     [...ol.children].forEach((li, i) => {
       const skip = i <= skipTo;
       const paused = s.state === "paused" && i === current;
-      li.className = "step" + (skip ? " skip" : i < current ? " done"
-        : i === current ? (live ? " live done" : paused ? "" : " active") : "");
+      let cls = skip ? " skip" : i < current ? " done"
+        : i === current ? (live ? " live done" : paused ? "" : " active") : "";
+      if (li.dataset.key === "models" && dl) {
+        cls = downloading(job) ? " active" : dl === "done" ? " done" : "";
+      }
+      li.className = "step" + cls;
       const det = details[li.dataset.key] || (skip ? "reused" : "");
       li.querySelector(".det").textContent = det;
     });
@@ -391,7 +435,8 @@
     setText(pill, label, false);
     $("rate").textContent = p && p.cost_per_hr ? `$${Number(p.cost_per_hr).toFixed(2)} / hr` : "— / hr";
     const gpu = $("gpu");
-    gpu.textContent = p && p.gpu_name ? shortGpu(p.gpu_name) : `${shortGpu(s.gpu)}`;
+    const picked = s.state === "idle" && (s.gpus.find((g) => g.key === chosenGpu) || {}).id;
+    gpu.textContent = p && p.gpu_name ? shortGpu(p.gpu_name) : shortGpu(picked || s.gpu);
     gpu.classList.toggle("dim", !(p && p.gpu_name));
     const host = $("host");
     const bits = [];

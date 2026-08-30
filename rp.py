@@ -3,7 +3,8 @@
 
 Commands:
   start     launch (or reuse) a pod, connect, open ComfyUI in the browser
-            (--models krea2 qwen21 etc. picks the model sets; see models.json)
+            (--models krea2 qwen21 etc. picks the model sets; see models.json,
+            --gpu 4090 / 5090 / pro6000 the GPU; see gpu_types in config.json)
   (dashboard.py serves a web UI for start/stop and runs these commands)
   up        launch a pod, run remote setup, download default models
   models    download model sets onto the pod (see models.json)
@@ -20,6 +21,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -135,6 +137,11 @@ def shlex_quote(s):
     return "'" + s.replace("'", "'\"'\"'") + "'"
 
 
+# ssh processes of running scripts, so background downloads can be stopped.
+_scripts = set()
+_scripts_stopped = threading.Event()
+
+
 def ssh_script(pod, script_path, *args, secrets=None):
     """Pipe a local shell script to bash on the pod.
 
@@ -146,7 +153,16 @@ def ssh_script(pod, script_path, *args, secrets=None):
     script = Path(script_path).read_bytes()
     if secrets:
         script = "".join(f"{k}={shlex_quote(v)}\n" for k, v in secrets.items()).encode() + script
-    return subprocess.run(cmd, input=script).returncode
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+    _scripts.add(proc)
+    try:
+        proc.communicate(script)
+    except BaseException:
+        proc.kill()
+        raise
+    finally:
+        _scripts.discard(proc)
+    return proc.returncode
 
 
 # --- commands ---------------------------------------------------------------
@@ -187,6 +203,7 @@ def cmd_up(args):
         sys.exit(f"A pod is already recorded ({existing['id']}). Use `status`, or `down` first.")
     # Checked before launching so a typo doesn't cost a pod.
     sets = [] if args.no_setup or args.no_models else model_sets(args.models)
+    args.gpu = gpu_type(args.gpu)
     attempts = CONFIG.get("launch_attempts", 3)
     timeout = CONFIG.get("launch_timeout_s", 240)
     for attempt in range(1, attempts + 1):
@@ -212,6 +229,8 @@ def cmd_up(args):
     if args.no_setup:
         return
     run_setup(pod)
+    if getattr(args, "defer_downloads", False):
+        return  # `start` downloads while ComfyUI is already in use
     if sets:
         rc = download_models(pod, sets)
         if rc != 0:
@@ -219,6 +238,14 @@ def cmd_up(args):
         record_models(pod, sets)
         download_loras(pod, sets)
     print("Ready. Next: python rp.py connect")
+
+
+def gpu_type(name):
+    """The RunPod GPU type id for a gpu_types alias (e.g. 5090) or a full id; default gpu_type."""
+    if not name:
+        return CONFIG["gpu_type"]
+    aliases = CONFIG.get("gpu_types", {})
+    return aliases.get(name, name)
 
 
 def model_sets(names):
@@ -280,7 +307,7 @@ def launch(args, timeout, disk):
     body = {
         "name": CONFIG["pod_name"],
         "templateId": CONFIG["template_id"],
-        "gpuTypeIds": [args.gpu or CONFIG["gpu_type"]],
+        "gpuTypeIds": [args.gpu],
         "gpuCount": 1,
         "cloudType": CONFIG["cloud_type"],
         "containerDiskInGb": disk,
@@ -343,7 +370,7 @@ def cmd_models(args):
     sys.exit(download_models(current_pod(), model_sets(args.sets)))
 
 
-def download_models(pod, names):
+def download_models(pod, names, background=False):
     catalog = load_json(ROOT / "models.json")
     unknown = [n for n in names if n not in catalog]
     if unknown:
@@ -359,11 +386,17 @@ def download_models(pod, names):
     total = sum(catalog[n].get("size_gb", 0) for n in names)
     label = ", ".join(catalog[n].get("name", n) for n in names)
     print(f"Downloading {label} (~{total:.0f} GB) on the pod")
-    emit("phase", name="models", detail=label)
-    return ssh_script(pod, ROOT / "remote" / "models.sh", *specs)
+    if background:
+        emit("download", state="models", detail=label)
+    else:
+        emit("phase", name="models", detail=label)
+    # Gated repos (e.g. FLUX.2 Klein) need HF_TOKEN and the license accepted on Hugging Face.
+    token = user_env("HF_TOKEN")
+    return ssh_script(pod, ROOT / "remote" / "models.sh", *specs,
+                      secrets={"HF_TOKEN": token} if token else None)
 
 
-def download_loras(pod, sets, ids=None):
+def download_loras(pod, sets, ids=None, background=False):
     """Download the library's LoRAs for these model sets (or just `ids`) onto the pod.
 
     The library is read again after each pass, so LoRAs added meanwhile (from the
@@ -377,7 +410,10 @@ def download_loras(pod, sets, ids=None):
         if not todo:
             break
         if not done:
-            emit("phase", name="loras")
+            if background:
+                emit("download", state="loras")
+            else:
+                emit("phase", name="loras")
         for i, lora in enumerate(todo, 1):
             done.add(lora["id"])
             print(f"[{i}/{len(todo)}] LoRA {lora['name']} -> loras/{lora['set']}/{lora['file']}", flush=True)
@@ -480,8 +516,51 @@ def cmd_connect(args):
     run_connect(current_pod(), CONFIG, ssh_base, ROOT, open_browser=args.open)
 
 
+def download_in_background(pod, sets):
+    """Download model sets and their LoRAs while ComfyUI is already in use.
+
+    ComfyUI lists files that arrive later once its model lists are refreshed (R).
+    Returns the thread; stop_downloads() ends it.
+    """
+    emit("download", state="start")
+
+    def run():
+        rc = download_models(pod, sets, background=True)
+        if _scripts_stopped.is_set():
+            return
+        if rc != 0:
+            print(f"Model download failed (exit {rc}); retry with: python rp.py models", flush=True)
+            emit("download", state="error")
+            return
+        record_models(pod, sets)
+        download_loras(pod, sets, background=True)
+        if not _scripts_stopped.is_set():
+            print("Models ready. Press R in ComfyUI to refresh its model lists.", flush=True)
+            emit("download", state="done")
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    return thread
+
+
+def stop_downloads(thread):
+    """End unfinished background downloads; the next start resumes them."""
+    if not thread.is_alive():
+        return
+    _scripts_stopped.set()
+    for proc in list(_scripts):
+        proc.kill()
+    thread.join(10)
+    print("Stopped the unfinished model downloads; the next start resumes them.", flush=True)
+    emit("download", state="stopped")
+
+
 def cmd_start(args):
-    """Reuse the recorded pod if it's still running, otherwise launch one; then connect."""
+    """Reuse the recorded pod if it's still running, otherwise launch one; then connect.
+
+    ComfyUI opens as soon as it's set up; models and LoRAs download meanwhile.
+    """
+    sets = model_sets(args.models)
     pod = load_json(POD_FILE)
     if pod:
         try:
@@ -491,22 +570,21 @@ def cmd_start(args):
         if info and info.get("desiredStatus") == "RUNNING" and pod.get("ssh_port"):
             print(f"Reusing running pod {pod['id']}")
             emit("reuse", pod=pod["id"])
-            # The running pod may have been started with other model sets.
-            sets = model_sets(args.models)
-            rc = download_models(pod, sets)
-            if rc != 0:
-                sys.exit(f"Model download failed (exit {rc})")
-            record_models(pod, sets)
-            download_loras(pod, sets)
         else:
             print(f"Recorded pod {pod['id']} is gone; launching a new one")
             POD_FILE.unlink(missing_ok=True)
             pod = None
     if not pod:
-        cmd_up(argparse.Namespace(gpu=None, min_ram=None, no_setup=False, no_models=False,
-                                  models=args.models))
+        cmd_up(argparse.Namespace(gpu=args.gpu, min_ram=None, no_setup=False, no_models=False,
+                                  models=args.models, defer_downloads=True))
+    # A reused pod may have been started with other model sets; files already
+    # there are skipped.
+    downloads = download_in_background(current_pod(), sets)
     from sync import run_connect
-    run_connect(current_pod(), CONFIG, ssh_base, ROOT, open_browser=not args.no_open)
+    try:
+        run_connect(current_pod(), CONFIG, ssh_base, ROOT, open_browser=not args.no_open)
+    finally:
+        stop_downloads(downloads)
     if events.ENABLED:
         return
     try:
@@ -523,7 +601,8 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
     up = sub.add_parser("up", help="launch a pod")
-    up.add_argument("--gpu", help="override the GPU type id from config.json")
+    up.add_argument("--gpu", help="GPU alias from gpu_types in config.json (4090, 5090, pro6000) "
+                                  "or a RunPod GPU type id (default: gpu_type)")
     up.add_argument("--min-ram", type=int, help="override min_ram_gb from config.json")
     up.add_argument("--no-setup", action="store_true", help="only launch; skip setup and models")
     up.add_argument("--no-models", action="store_true", help="skip downloading models")
@@ -547,6 +626,8 @@ def main():
     st = sub.add_parser("start", help="launch or reuse a pod, then connect and open the browser")
     st.add_argument("--models", nargs="+", metavar="SET",
                     help="model sets from models.json (default: default_models in config.json)")
+    st.add_argument("--gpu", help="GPU for a new pod: alias from gpu_types in config.json "
+                                  "(4090, 5090, pro6000) or a RunPod GPU type id (default: gpu_type)")
     st.add_argument("--no-open", action="store_true", help="don't open ComfyUI in the browser")
     st.set_defaults(func=cmd_start)
     sub.add_parser("status", help="show the pod").set_defaults(func=cmd_status)

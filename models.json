@@ -63,5 +63,36 @@
         ]
       }
     }
+  },
+  "klein9b": {
+    "name": "FLUX.2 Klein 9B",
+    "description": "FLUX.2 [klein] 9B distilled (4-step, fp8; gated, needs HF_TOKEN and the license accepted), Qwen3 8B text encoder (fp8 mixed), FLUX.2 VAE, live-preview decoder",
+    "size_gb": 18.4,
+    "files": {
+      "black-forest-labs/FLUX.2-klein-9b-fp8": {
+        "into": "diffusion_models",
+        "files": [
+          "flux-2-klein-9b-fp8.safetensors"
+        ]
+      },
+      "https://huggingface.co/Comfy-Org/vae-text-encorder-for-flux-klein-9b/resolve/main/split_files/text_encoders": {
+        "into": "text_encoders",
+        "files": [
+          "qwen_3_8b_fp8mixed.safetensors"
+        ]
+      },
+      "https://huggingface.co/Comfy-Org/vae-text-encorder-for-flux-klein-9b/resolve/main/split_files/vae": {
+        "into": "vae",
+        "files": [
+          "flux2-vae.safetensors"
+        ]
+      },
+      "https://raw.githubusercontent.com/madebyollin/taesd/main": {
+        "into": "vae_approx",
+        "files": [
+          "taef2_decoder.pth"
+        ]
+      }
+    }
   }
 }
