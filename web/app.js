@@ -109,7 +109,7 @@
 
   function shortGpu(name) {
     return (name || "GPU").replace(/^NVIDIA\s+/i, "").replace(/^GeForce\s+/i, "")
-      .replace(/\s+Blackwell.*$/i, "");
+      .replace(/\s+Blackwell\b.*$/i, "");
   }
 
   // ---------- requests ----------
