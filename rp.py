@@ -360,7 +360,10 @@ def download_models(pod, names):
     label = ", ".join(catalog[n].get("name", n) for n in names)
     print(f"Downloading {label} (~{total:.0f} GB) on the pod")
     emit("phase", name="models", detail=label)
-    return ssh_script(pod, ROOT / "remote" / "models.sh", *specs)
+    # Gated repos (e.g. FLUX.2 Klein) need HF_TOKEN and the license accepted on Hugging Face.
+    token = user_env("HF_TOKEN")
+    return ssh_script(pod, ROOT / "remote" / "models.sh", *specs,
+                      secrets={"HF_TOKEN": token} if token else None)
 
 
 def download_loras(pod, sets, ids=None):

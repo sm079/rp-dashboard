@@ -5,6 +5,7 @@
 # ComfyUI's models/ layout (diffusion_models/, text_encoders/, vae/, loras/).
 # A repo that is an https:// URL is a plain file host: each path is fetched
 # from <url>/<path>, for files that aren't on Hugging Face.
+# HF_TOKEN, if set at the top of the piped script, is passed to `hf` for gated repos.
 set -euo pipefail
 
 COMFY_DIR="$(cat /root/.comfyui_dir 2>/dev/null || true)"
@@ -37,7 +38,7 @@ for spec in "$@"; do
       mv "$dest/$f.part" "$dest/$f"
     done
   else
-    hf download "$repo" "${files[@]}" --local-dir "$dest"
+    HF_TOKEN="${HF_TOKEN:-}" hf download "$repo" "${files[@]}" --local-dir "$dest"
   fi
 done
 
