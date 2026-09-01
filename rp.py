@@ -629,6 +629,9 @@ USER_DATA_HELP = ("where ComfyUI keeps inputs, outputs, workflows and settings o
 
 
 def main():
+    # LoRA names can hold any script; a cp1252 pipe would crash on them.
+    for stream in (sys.stdout, sys.stderr):
+        stream.reconfigure(errors="replace")
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
     up = sub.add_parser("up", help="launch a pod")
