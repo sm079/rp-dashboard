@@ -4,7 +4,8 @@
 Commands:
   start     launch (or reuse) a pod, connect, open ComfyUI in the browser
             (--models krea2 qwen21 etc. picks the model sets; see models.json,
-            --gpu 4090 / 5090 / pro6000 the GPU; see gpu_types in config.json)
+            --gpu 4090 / 5090 / pro6000 the GPU; see gpu_types in config.json,
+            --user-data ram / disk where ComfyUI keeps inputs, outputs and workflows)
   (dashboard.py serves a web UI for start/stop and runs these commands)
   up        launch a pod, run remote setup, download default models
   models    download model sets onto the pod (see models.json)
@@ -204,6 +205,7 @@ def cmd_up(args):
     # Checked before launching so a typo doesn't cost a pod.
     sets = [] if args.no_setup or args.no_models else model_sets(args.models)
     args.gpu = gpu_type(args.gpu)
+    user_data = user_data_mode(args.user_data)
     attempts = CONFIG.get("launch_attempts", 3)
     timeout = CONFIG.get("launch_timeout_s", 240)
     for attempt in range(1, attempts + 1):
@@ -228,7 +230,7 @@ def cmd_up(args):
     print(f"SSH ready: root@{pod['ip']} -p {pod['ssh_port']}")
     if args.no_setup:
         return
-    run_setup(pod)
+    run_setup(pod, user_data)
     if getattr(args, "defer_downloads", False):
         return  # `start` downloads while ComfyUI is already in use
     if sets:
@@ -246,6 +248,14 @@ def gpu_type(name):
         return CONFIG["gpu_type"]
     aliases = CONFIG.get("gpu_types", {})
     return aliases.get(name, name)
+
+
+def user_data_mode(mode):
+    """Where ComfyUI keeps user data on the pod: "ram" (/dev/shm) or "disk"; default user_data."""
+    mode = mode or CONFIG.get("user_data", "ram")
+    if mode not in ("ram", "disk"):
+        sys.exit(f"user_data must be ram or disk, not {mode!r}")
+    return mode
 
 
 def model_sets(names):
@@ -348,22 +358,26 @@ def launch(args, timeout, disk):
     return pod
 
 
-def run_setup(pod):
-    emit("phase", name="setup")
+def run_setup(pod, user_data):
+    emit("phase", name="setup", detail=user_data)
     if CONFIG.get("comfyui_version"):
         print(f"Pinning ComfyUI {CONFIG['comfyui_version']} and installing custom nodes...")
         rc = ssh_script(pod, ROOT / "remote" / "comfyui.sh",
                         CONFIG["comfyui_version"], *CONFIG.get("custom_nodes", []))
         if rc != 0:
             sys.exit(f"ComfyUI update failed (exit {rc})")
-    print("Running remote setup (RAM-only ComfyUI folders, localhost only)...")
-    rc = ssh_script(pod, ROOT / "remote" / "setup.sh", *CONFIG.get("comfyui_args", []))
+    where = "in RAM" if user_data == "ram" else "on the pod's disk"
+    print(f"Running remote setup (ComfyUI user data {where}, localhost only)...")
+    rc = ssh_script(pod, ROOT / "remote" / "setup.sh", user_data, *CONFIG.get("comfyui_args", []))
     if rc != 0:
         sys.exit(f"Remote setup failed (exit {rc})")
+    pod["user_data"] = user_data
+    save_json(POD_FILE, pod)
 
 
 def cmd_setup(args):
-    run_setup(current_pod())
+    pod = current_pod()
+    run_setup(pod, user_data_mode(args.user_data or pod.get("user_data")))
 
 
 def cmd_models(args):
@@ -576,7 +590,7 @@ def cmd_start(args):
             pod = None
     if not pod:
         cmd_up(argparse.Namespace(gpu=args.gpu, min_ram=None, no_setup=False, no_models=False,
-                                  models=args.models, defer_downloads=True))
+                                  models=args.models, user_data=args.user_data, defer_downloads=True))
     # A reused pod may have been started with other model sets; files already
     # there are skipped.
     downloads = download_in_background(current_pod(), sets)
@@ -597,6 +611,10 @@ def cmd_start(args):
         print("Pod left running (and billing). Stop it later from the dashboard or: python rp.py down")
 
 
+USER_DATA_HELP = ("where ComfyUI keeps inputs, outputs, workflows and settings on the pod: "
+                  "ram or disk (default: user_data in config.json)")
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -604,12 +622,16 @@ def main():
     up.add_argument("--gpu", help="GPU alias from gpu_types in config.json (4090, 5090, pro6000) "
                                   "or a RunPod GPU type id (default: gpu_type)")
     up.add_argument("--min-ram", type=int, help="override min_ram_gb from config.json")
+    up.add_argument("--user-data", choices=["ram", "disk"], help=USER_DATA_HELP)
     up.add_argument("--no-setup", action="store_true", help="only launch; skip setup and models")
     up.add_argument("--no-models", action="store_true", help="skip downloading models")
     up.add_argument("--models", nargs="+", metavar="SET",
                     help="model sets from models.json (default: default_models in config.json)")
     up.set_defaults(func=cmd_up)
-    sub.add_parser("setup", help="re-run the remote setup").set_defaults(func=cmd_setup)
+    se = sub.add_parser("setup", help="re-run the remote setup")
+    se.add_argument("--user-data", choices=["ram", "disk"],
+                    help="where ComfyUI keeps user data (default: as the pod was set up)")
+    se.set_defaults(func=cmd_setup)
     m = sub.add_parser("models", help="download model sets onto the pod")
     m.add_argument("sets", nargs="*",
                    help="model set names from models.json (default: default_models in config.json)")
@@ -628,6 +650,7 @@ def main():
                     help="model sets from models.json (default: default_models in config.json)")
     st.add_argument("--gpu", help="GPU for a new pod: alias from gpu_types in config.json "
                                   "(4090, 5090, pro6000) or a RunPod GPU type id (default: gpu_type)")
+    st.add_argument("--user-data", choices=["ram", "disk"], help=USER_DATA_HELP + " (a new pod only)")
     st.add_argument("--no-open", action="store_true", help="don't open ComfyUI in the browser")
     st.set_defaults(func=cmd_start)
     sub.add_parser("status", help="show the pod").set_defaults(func=cmd_status)

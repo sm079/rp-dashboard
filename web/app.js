@@ -10,6 +10,7 @@
   let S = null;              // latest server snapshot
   let chosenModels = null;   // model set keys picked in the UI
   let chosenGpu = null;      // gpu_types key picked in the UI
+  let chosenUserData = null; // "ram" or "disk", picked in the UI
   let pending = false;       // a request is in flight
   let lastBeat = 0;
   let transfer = null, transferAt = 0;
@@ -30,7 +31,9 @@
       : `Requesting a ${shortGpu(s.gpu)} on secure cloud.`],
     ssh: ["Booting the pod", () => "Waiting for the container to start and accept SSH."],
     health: ["Checking the host", () => "Timing SSH and disk writes to skip an overloaded machine."],
-    setup: ["Setting up ComfyUI", () => "Pinning the release, moving user folders to RAM, binding to localhost."],
+    setup: ["Setting up ComfyUI", (s) => s.job.detail === "disk"
+      ? "Pinning the release, keeping user folders on the pod's disk, binding to localhost."
+      : "Pinning the release, moving user folders to RAM, binding to localhost."],
     connect: ["Connecting", () => "Opening the tunnel and uploading local workflows, settings and LoRAs."],
   };
 
@@ -141,7 +144,7 @@
   }
 
   const act = {
-    start: () => post("/api/start", { models: chosenModels, gpu: chosenGpu }),
+    start: () => post("/api/start", { models: chosenModels, gpu: chosenGpu, user_data: chosenUserData }),
     stop: () => post("/api/stop"),
     cancel: () => {
       if (S.job && S.job.reusing) return act.stop();
@@ -170,6 +173,7 @@
     const s = S;
     if (!chosenModels) chosenModels = [...s.models];
     if (!chosenGpu) chosenGpu = s.gpu_key;
+    if (!chosenUserData) chosenUserData = s.user_data;
     if (body.dataset.state !== s.state) {
       const prev = body.dataset.state;
       body.dataset.state = s.state;
@@ -179,6 +183,7 @@
     renderActions(s);
     renderModels(s);
     renderGpus(s);
+    renderUserData(s);
     renderSteps(s);
     renderPod(s);
     renderSync(s);
@@ -360,6 +365,32 @@
     }
     const editable = s.state === "idle";
     const shown = editable ? chosenGpu : s.gpu_key;
+    box.classList.toggle("locked", !editable || pending);
+    for (const b of box.querySelectorAll(".chip")) b.setAttribute("aria-pressed", b.dataset.key === shown);
+  }
+
+  // Where a new pod keeps user data; a running pod keeps what it was set up with.
+  const USER_DATA = [
+    { key: "ram", name: "RAM", title: "Keep inputs, outputs and workflows in the pod's RAM" },
+    { key: "disk", name: "Disk", title: "Inputs, outputs and workflows are kept on the pod's disk" },
+  ];
+  function renderUserData(s) {
+    const box = $("userData");
+    if (!box.children.length) {
+      box.replaceChildren(...USER_DATA.map((u) => {
+        const b = el("button", "chip", `<span class="chip-name">${esc(u.name)}</span>`);
+        b.type = "button";
+        b.dataset.key = u.key;
+        b.title = u.title;
+        b.onclick = () => {
+          chosenUserData = u.key;
+          render();
+        };
+        return b;
+      }));
+    }
+    const editable = s.state === "idle";
+    const shown = editable ? chosenUserData : (s.pod && s.pod.user_data) || s.user_data;
     box.classList.toggle("locked", !editable || pending);
     for (const b of box.querySelectorAll(".chip")) b.setAttribute("aria-pressed", b.dataset.key === shown);
   }

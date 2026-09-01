@@ -14,6 +14,7 @@
   "pod_name": "comfyui",
   "ssh_key": "~/.ssh/id_ed25519",
   "local_port": 8288,
+  "user_data": "ram",
   "sync_dir": "sync",
   "default_models": [
     "krea2",

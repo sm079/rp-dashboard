@@ -6,7 +6,9 @@ inputs, outputs and workflows synced to a local folder.
 - The pod is launched from RunPod's official ComfyUI template with only port
   22 exposed: no public proxy URLs for ComfyUI, Jupyter or the file browser.
 - ComfyUI is restarted to listen on `127.0.0.1` and to keep its input, output,
-  temp and user (workflows/settings) folders in RAM (`/dev/shm`).
+  temp and user (workflows/settings) folders in one data folder, in RAM
+  (`/dev/shm`) by default or on the pod's disk (`user_data` in `config.json`,
+  the **User data** picker in the dashboard, or `--user-data disk`).
 - `connect` opens an SSH tunnel to `http://localhost:8288` (so a local
   ComfyUI can keep 8188) and syncs the local `sync/` folder with the pod:
 
@@ -16,11 +18,11 @@ inputs, outputs and workflows synced to a local folder.
   | `sync/inputs/`    | both ways    | ComfyUI's input folder                       |
   | `sync/workflows/` | both ways    | saved workflows                              |
   | `sync/settings/`  | both ways    | ComfyUI settings and keybindings             |
-  | `sync/loras/`     | local → pod  | an extra LoRA folder in the pod's RAM        |
+  | `sync/loras/`     | local → pod  | an extra LoRA folder in the data folder      |
 
   For both-way folders the latest change wins, and deletions are mirrored
   both ways; deleting a local LoRA removes it from the pod. Outputs are never
-  deleted on either side. Safeguards: a pod restart (which wipes its RAM) is
+  deleted on either side. Safeguards: a pod restart (which wipes RAM) is
   detected and deletes nothing locally, a pod-side deletion must show in two
   consecutive listings, a locally edited file is never deleted, and a sudden
   mass deletion on the pod is refused with a warning. On connect, local files
@@ -80,6 +82,7 @@ The same from a shell:
 python dashboard.py      # the web dashboard
 python rp.py start       # up (if needed) + connect + open the browser
 python rp.py start --models krea2 h3
+python rp.py start --user-data disk   # keep ComfyUI's user data on the pod's disk
 python rp.py up          # launch, set up, download default models (~71 GB, ~2 min)
 python rp.py connect     # tunnel + sync; open http://localhost:8288
 python rp.py down        # copy anything unsaved, then terminate the pod
@@ -95,7 +98,8 @@ the LoRA list (the same one the dashboard shows, kept in `.state/loras.json`).
 - `config.json`: GPU type (`gpu_type`, the default) and the GPUs to choose
   from (`gpu_types`: `4090`, `5090`, `pro6000`; pick one in the dashboard or
   with `rp.py start --gpu pro6000`), cloud type, template, disk size, local port,
-  dashboard port, sync folder, the model sets used when none are chosen
+  dashboard port, sync folder, where ComfyUI keeps user data on the pod
+  (`user_data`: `ram`, the default, or `disk`), the model sets used when none are chosen
   (`default_models`), the ComfyUI release to pin (`comfyui_version`) and extra
   custom nodes (`custom_nodes`, git URLs) installed on each setup. The
   container disk grows past `container_disk_gb` when the chosen sets need more

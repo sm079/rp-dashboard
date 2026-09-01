@@ -1,4 +1,4 @@
-"""SSH tunnel to ComfyUI plus syncing a local folder with the pod's RAM.
+"""SSH tunnel to ComfyUI plus syncing a local folder with the pod's data folder.
 
 Local layout (<sync_dir>/...):
   outputs/    pod -> local, in <YYYY-MM-DD>/ folders by the day they were copied;
@@ -6,7 +6,7 @@ Local layout (<sync_dir>/...):
   inputs/     both ways (ComfyUI's input folder)
   workflows/  both ways (saved workflows)
   settings/   both ways (comfy.settings.json, keybindings)
-  loras/      local -> pod (an extra LoRA folder in the pod's RAM)
+  loras/      local -> pod (an extra LoRA folder in the pod's data folder)
 
 Both-way folders: latest change wins, and deletions are mirrored. Deleting a
 local LoRA removes it from the pod. Outputs are never deleted on either side:
@@ -14,9 +14,10 @@ the local copies are the archive.
 On connect, local files are uploaded before anything is pulled, so a fresh pod
 picks up local workflows/settings instead of overwriting them with defaults.
 
-A pod restart wipes its RAM, which would look like every file was deleted.
-The pod's RAM holds a random session id; when it changes (or is missing),
-nothing is deleted locally and local files are uploaded again instead.
+The data folder is in the pod's RAM (the default) or on its disk; see
+remote/setup.sh. A pod restart wipes RAM, which would look like every file was
+deleted. The data folder holds a random session id; when it changes (or is
+missing), nothing is deleted locally and local files are uploaded again instead.
 """
 import datetime
 import json
@@ -35,15 +36,16 @@ from pathlib import Path, PurePosixPath
 
 from events import emit
 
-RAM = "/dev/shm/comfy"
+# Set up by remote/setup.sh: a link to /dev/shm/comfy (RAM) or a folder on disk.
+DATA = "/root/comfy-data"
 # kind -> (remote dir, extra find args, local subfolder, direction)
 KINDS = {
-    "o": (f"{RAM}/output", "", "outputs", "pull"),
-    "i": (f"{RAM}/input", "", "inputs", "both"),
-    "w": (f"{RAM}/user/default/workflows", "", "workflows", "both"),
+    "o": (f"{DATA}/output", "", "outputs", "pull"),
+    "i": (f"{DATA}/input", "", "inputs", "both"),
+    "w": (f"{DATA}/user/default/workflows", "", "workflows", "both"),
     # Top-level files only: comfy.settings.json, comfy.keybindings.json, ...
-    "s": (f"{RAM}/user/default", "-maxdepth 1", "settings", "both"),
-    "l": (f"{RAM}/loras", "", "loras", "push"),
+    "s": (f"{DATA}/user/default", "-maxdepth 1", "settings", "both"),
+    "l": (f"{DATA}/loras", "", "loras", "push"),
 }
 PULLED = [k for k, v in KINDS.items() if v[3] in ("pull", "both")]
 PUSHED = [k for k, v in KINDS.items() if v[3] in ("push", "both")]
@@ -51,7 +53,7 @@ POLL_SECONDS = 3
 END_MARK = "__END_OF_LISTING__"
 UNSAFE = re.compile(r'[<>:"\\|?*\x00-\x1f]')
 SKIP_SUFFIXES = (".tmp", ".part", ".partial")
-SESSION_FILE = f"{RAM}/.session-id"
+SESSION_FILE = f"{DATA}/.session-id"
 # Refuse to mirror more pod-side deletions than this in one go (per folder),
 # unless they are at most half of that folder's files.
 MASS_DELETE = 3
@@ -209,10 +211,10 @@ def upload(pod, ssh_base, remote_dir, local_root, paths, progress=None):
     """Stream local files to remote_dir as a tar."""
     cmd = ssh_base(pod, "-o", "BatchMode=yes") + [
         # Extract into a staging dir, then move each file into place (same
-        # tmpfs, so the move is atomic): ComfyUI never sees a partial file and
+        # filesystem, so the move is atomic): ComfyUI never sees a partial file and
         # an interrupted upload leaves nothing behind.
-        f"set -e; dest={quote(remote_dir)}; mkdir -p \"$dest\" {RAM}/.incoming; "
-        f"tmp=$(mktemp -d {RAM}/.incoming/up.XXXXXX); trap 'rm -rf \"$tmp\"' EXIT; "
+        f"set -e; dest={quote(remote_dir)}; mkdir -p \"$dest\" {DATA}/.incoming; "
+        f"tmp=$(mktemp -d {DATA}/.incoming/up.XXXXXX); trap 'rm -rf \"$tmp\"' EXIT; "
         "tar -C \"$tmp\" -xf -; cd \"$tmp\"; "
         "find . -type f | while IFS= read -r f; do "
         "mkdir -p \"$dest/$(dirname \"$f\")\"; mv -f \"$f\" \"$dest/$f\"; done"]
@@ -256,7 +258,7 @@ class Syncer:
         self.pulled = set(state.get("pulled", []))
         # Local versions already in sync with the pod: "kind|rel" -> [size, mtime_ns].
         self.local = state.get("local", {})
-        # The pod RAM session these records belong to.
+        # The pod data session these records belong to.
         self.session = state.get("session")
         # Remote paths we just uploaded; their next listed version is ours.
         self.acks = set()
@@ -270,9 +272,9 @@ class Syncer:
              "pulled": sorted(self.pulled), "local": self.local}))
 
     def ensure_session(self):
-        """Make sure the pod has a RAM session id; reset records if it's new.
+        """Make sure the pod has a data session id; reset records if it's new.
 
-        Returns True if the records were reset (fresh or restarted pod RAM)."""
+        Returns True if the records were reset (fresh pod or wiped data folder)."""
         cmd = self.ssh_base(self.pod, "-o", "BatchMode=yes") + [
             f"[ -s {SESSION_FILE} ] || cat /proc/sys/kernel/random/uuid > {SESSION_FILE}; "
             f"cat {SESSION_FILE}"]
@@ -285,7 +287,7 @@ class Syncer:
             self.save_state()
             return False
         if self.session is not None:
-            print("Pod RAM was reset (pod restarted); re-uploading local files, "
+            print("Pod data folder was reset (pod restarted?); re-uploading local files, "
                   "deleting nothing locally.", flush=True)
         self.session = current
         self.pulled, self.local, self.acks, self.last_scan = set(), {}, set(), {}
@@ -497,7 +499,7 @@ def run_connect(pod, config, ssh_base, root, open_browser=False):
                 continue
             emit("heartbeat")
             if pod_session != syncer.session:
-                # Pod RAM was wiped (or set up again): start over, deleting nothing.
+                # Pod data was wiped (or set up again): start over, deleting nothing.
                 syncer.ensure_session()
                 syncer.push(require_stable=False)
                 seen, prev_files = {}, None
@@ -528,7 +530,7 @@ def sync_once(pod, config, ssh_base, root):
         raise RuntimeError(f"could not list pod files: {res.stderr.strip()}")
     files, session = parse_listing(res.stdout.splitlines())
     if session != syncer.session:
-        # Records belong to another RAM session; pull outputs as new.
+        # Records belong to another data session; pull outputs as new.
         syncer.pulled, syncer.local, syncer.session = set(), {}, session
     todo = syncer.pending_pulls(files)
     if todo:

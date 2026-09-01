@@ -35,7 +35,8 @@ WEB = ROOT / "web"
 CONFIG = rp.CONFIG
 MODELS = rp.load_json(ROOT / "models.json", {})
 GPUS = CONFIG.get("gpu_types") or {"default": CONFIG["gpu_type"]}
-# The model sets and GPU picked last time, preselected on the next start.
+USER_DATA = ("ram", "disk")
+# The model sets, GPU and user data place picked last time, preselected on the next start.
 SELECTION_FILE = rp.STATE_DIR / "dashboard.json"
 PORT = CONFIG.get("dashboard_port", 8287)
 COMFY_PORT = CONFIG.get("local_port", 8288)
@@ -266,6 +267,8 @@ class Controller:
         saved = rp.load_json(SELECTION_FILE) or {}
         self.models = [m for m in saved.get("models") or CONFIG.get("default_models", []) if m in MODELS]
         self.gpu = saved.get("gpu") if saved.get("gpu") in GPUS else default_gpu()
+        self.user_data = (saved.get("user_data") if saved.get("user_data") in USER_DATA
+                          else CONFIG.get("user_data", "ram"))
         self.files = {"folders": {}, "outputs": [], "today": 0}
         self.lora_status = {}      # LoRA id -> {"state": queued|downloading|done|error, "pct", "error"}
         self.lora_job = None       # `rp.py lora download` beside the main job, on a running pod
@@ -294,6 +297,7 @@ class Controller:
             if pod:
                 pod_view = {"id": pod["id"], "created": pod.get("created"),
                             "ready": bool(pod.get("ssh_port")), "models": pod.get("models", []),
+                            "user_data": pod.get("user_data"),
                             **(self.pod_info or {})}
             return {
                 "state": self.state_name(),
@@ -309,6 +313,7 @@ class Controller:
                 "gpu": GPUS[self.gpu],
                 "gpu_key": self.gpu,
                 "gpus": [{"key": k, "id": v} for k, v in GPUS.items()],
+                "user_data": self.user_data,
                 "transfer": self.transfer,
                 "loras": [{**{k: v for k, v in l.items() if k not in ("download", "auth")},
                            **self.lora_status.get(l["id"], {})} for l in loras.load()],
@@ -323,7 +328,7 @@ class Controller:
 
     # --- actions ----------------------------------------------------------
 
-    def start(self, models, gpu):
+    def start(self, models, gpu, user_data):
         with self.lock:
             if self.job:
                 return "Something is already running."
@@ -331,6 +336,8 @@ class Controller:
                 return "Pick at least one model."
             if gpu not in GPUS:
                 return f"Unknown GPU: {gpu}."
+            if user_data not in USER_DATA:
+                return "User data goes in RAM or on disk."
             unknown = [str(m) for m in models if not isinstance(m, str) or m not in MODELS]
             if unknown:
                 return f"Unknown model sets: {', '.join(unknown)}."
@@ -341,12 +348,14 @@ class Controller:
             reusing = bool(pod and pod.get("ssh_port") and (self.pod_info or {}).get("status") == "RUNNING")
             self.models = list(dict.fromkeys(models))
             self.gpu = gpu
+            self.user_data = user_data
             self.error, self.transfer, self.comfy_up = None, None, False
             if not reusing:
                 self.lora_status = {}  # a new pod has none yet
-            rp.save_json(SELECTION_FILE, {"models": self.models, "gpu": self.gpu})
-            # The GPU only matters for a new pod; a reused one keeps its own.
-            args = ["start", "--models", *self.models, "--gpu", GPUS[gpu]] + (["--no-open"] if reusing else [])
+            rp.save_json(SELECTION_FILE, {"models": self.models, "gpu": self.gpu, "user_data": user_data})
+            # The GPU and user data place only matter for a new pod; a reused one keeps its own.
+            args = (["start", "--models", *self.models, "--gpu", GPUS[gpu], "--user-data", user_data]
+                    + (["--no-open"] if reusing else []))
             self.job = Job(self, "start", args, reusing=reusing)
         self.changed()
         self.wake.set()
@@ -711,7 +720,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_error(400)
         path = urlparse(self.path).path
         if path == "/api/start":
-            err = CTL.start(body.get("models", CTL.models), body.get("gpu", CTL.gpu))
+            err = CTL.start(body.get("models", CTL.models), body.get("gpu", CTL.gpu),
+                            body.get("user_data", CTL.user_data))
         elif path == "/api/stop":
             err = CTL.stop()
         elif path == "/api/terminate":
