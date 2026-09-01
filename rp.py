@@ -278,9 +278,10 @@ def record_models(pod, sets):
 
 
 def disk_gb(sets):
-    """Container disk for the template plus the model sets; container_disk_gb is the minimum."""
+    """Container disk for the template, the model sets and their LoRAs; container_disk_gb is the minimum."""
     catalog = load_json(ROOT / "models.json")
-    need = sum(catalog[n].get("size_gb", 0) for n in sets) + CONFIG.get("disk_headroom_gb", 30)
+    lora_gb = sum(l.get("size", 0) for l in loras.load() if l["set"] in sets and loras.enabled(l)) / 1e9
+    need = sum(catalog[n].get("size_gb", 0) for n in sets) + lora_gb + CONFIG.get("disk_headroom_gb", 30)
     return max(CONFIG["container_disk_gb"], math.ceil(need / 10) * 10)
 
 
@@ -411,7 +412,7 @@ def download_models(pod, names, background=False):
 
 
 def download_loras(pod, sets, ids=None, background=False):
-    """Download the library's LoRAs for these model sets (or just `ids`) onto the pod.
+    """Download the library's switched-on LoRAs for these model sets (or just `ids`) onto the pod.
 
     The library is read again after each pass, so LoRAs added meanwhile (from the
     dashboard) are picked up too. Files already on the pod are skipped. Returns the
@@ -420,7 +421,7 @@ def download_loras(pod, sets, ids=None, background=False):
     done, failed = set(), 0
     while True:
         todo = [l for l in loras.load() if l["id"] not in done
-                and (l["id"] in ids if ids else l["set"] in sets)]
+                and (l["id"] in ids if ids else l["set"] in sets and loras.enabled(l))]
         if not todo:
             break
         if not done:
@@ -453,7 +454,8 @@ def cmd_lora(args):
                 print(f"{catalog[key].get('name', key)} ({key}):")
                 for l in mine:
                     version = f" {l['version']}" if l["version"] else ""
-                    print(f"  {l['id']}  {l['name']}{version}  -> loras/{key}/{l['file']}")
+                    off = "" if loras.enabled(l) else "  (off: not downloaded)"
+                    print(f"  {l['id']}  {l['name']}{version}  -> loras/{key}/{l['file']}{off}")
         if not items:
             print("No LoRAs yet. Add one with: python rp.py lora add <set> <link>")
     elif args.action == "add":
@@ -475,6 +477,17 @@ def cmd_lora(args):
         for lora_id in args.args:
             gone = loras.remove(lora_id)
             print(f"Removed {gone['name']}" if gone else f"No LoRA {lora_id!r}")
+    elif args.action in ("on", "off"):
+        if not args.args:
+            sys.exit(f"Usage: rp.py lora {args.action} <id> [<id> ...] (ids from: rp.py lora list)")
+        for lora_id in args.args:
+            item = loras.set_enabled(lora_id, args.action == "on")
+            if not item:
+                print(f"No LoRA {lora_id!r}")
+            elif args.action == "on":
+                print(f"{item['name']} downloads with {catalog.get(item['set'], {}).get('name', item['set'])}")
+            else:
+                print(f"{item['name']} stays in the list but isn't downloaded")
     elif args.action == "download":
         pod = current_pod()
         known = {l["id"] for l in loras.load()}
@@ -637,9 +650,10 @@ def main():
                    help="model set names from models.json (default: default_models in config.json)")
     m.set_defaults(func=cmd_models)
     lo = sub.add_parser("lora", help="LoRAs from CivitAI or Hugging Face links, per model set",
-                        description="list | add <set> <link> | remove <id>... | download [<id>...] "
-                                    "(default: the LoRAs of the model sets on the pod)")
-    lo.add_argument("action", choices=["list", "add", "remove", "download"])
+                        description="list | add <set> <link> | remove <id>... | on <id>... | off <id>... | "
+                                    "download [<id>...] (default: the switched-on LoRAs of the model "
+                                    "sets on the pod). LoRAs switched off stay listed but aren't downloaded.")
+    lo.add_argument("action", choices=["list", "add", "remove", "on", "off", "download"])
     lo.add_argument("args", nargs="*")
     lo.set_defaults(func=cmd_lora)
     c = sub.add_parser("connect", help="tunnel to ComfyUI and sync the sync folder")

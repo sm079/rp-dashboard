@@ -68,7 +68,10 @@ served only to this machine, that does everything from the browser:
   and remembered. Each launch downloads the LoRAs of the ticked models; on a
   running pod a new LoRA downloads straight away, with live progress, while
   syncing carries on. They land in ComfyUI as `loras/<set>/<file>` (e.g.
-  `qwen21/…`), on the pod's disk next to the models.
+  `qwen21/…`), on the pod's disk next to the models. Each LoRA has a switch:
+  turned off, it stays in the list but isn't downloaded. Model sets bring
+  only the LoRAs their model needs (such as H3's turbo LoRAs); add any others
+  here.
 - The session cost, uptime, live transfers, sync folder counts, the latest
   outputs and the full command output are shown as they happen.
 
@@ -90,7 +93,8 @@ python rp.py down        # copy anything unsaved, then terminate the pod
 
 Other commands: `status`, `ssh [command]`, `setup` (re-run the remote setup),
 `models [set ...]` (download extra model sets), and `lora list`,
-`lora add <set> <link>`, `lora remove <id>`, `lora download [<id> ...]` for
+`lora add <set> <link>`, `lora remove <id>`, `lora on|off <id>`,
+`lora download [<id> ...]` for
 the LoRA list (the same one the dashboard shows, kept in `.state/loras.json`).
 
 ## Configuration

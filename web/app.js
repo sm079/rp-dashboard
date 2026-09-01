@@ -820,6 +820,9 @@
   }
 
   function loraState(l, pod) {
+    if (l.enabled === false && l.state !== "downloading") {
+      return ["", pod && l.state === "done" ? "Off · on pod" : "Off"];
+    }
     if (l.state === "downloading") return ["busy", l.pct != null ? `${Math.floor(l.pct)}%` : "Downloading"];
     if (l.state === "error") return ["danger", "Failed"];
     if (pod && l.state === "done") return ["ok", "On pod"];
@@ -859,7 +862,9 @@
 
   function loraRow(l, pod) {
     const li = el("li", "lrow");
+    const on = l.enabled !== false;
     li.dataset.state = l.state || "";
+    li.classList.toggle("off", !on);
     const [tone, label] = loraState(l, pod);
     const meta = [l.version, l.base, l.size ? human(l.size) : "", SOURCES[l.source]].filter(Boolean).join(" · ");
     const trig = (l.triggers || []).map((w) => `<button type="button" class="trig" title="Copy trigger word">${esc(w)}</button>`).join("");
@@ -873,11 +878,17 @@
         ${l.state === "downloading" ? `<div class="lbar"><i style="width:${Math.min(100, l.pct || 0)}%"></i></div>` : ""}
       </div>
       <div class="lside">
-        <span class="pill" data-tone="${tone}">${esc(label)}</span>
+        <div class="ltop">
+          <button type="button" class="lswitch" role="switch" aria-checked="${on}"
+            title="${on ? "Downloads onto pods with its model. Click to skip it." : "Not downloaded. Click to download it with its model."}"
+            aria-label="Download ${esc(l.name)} onto pods"><i></i></button>
+          <span class="pill" data-tone="${tone}">${esc(label)}</span>
+        </div>
         <div class="lbtns"></div>
       </div>`;
+    li.querySelector(".lswitch").onclick = () => post("/api/loras/toggle", { id: l.id, enabled: !on }, { lock: false });
     const btns = li.querySelector(".lbtns");
-    if (l.state === "error" && pod) {
+    if (l.state === "error" && pod && on) {
       const r = button("ghost xs", "Retry", null, () => post("/api/loras/retry", { id: l.id }, { lock: false }));
       btns.append(r);
     }
@@ -929,8 +940,8 @@
       pill.dataset.tone = onPod ? "ok" : "";
       pill.textContent = onPod ? "On pod" : "Not on this pod";
       sec.querySelector(".lhint").textContent = onPod
-        ? "Added LoRAs download onto the running pod straight away."
-        : `Added LoRAs download when ${m.name} is on a pod.`;
+        ? "LoRAs switched on download onto the running pod straight away."
+        : `LoRAs switched on download when ${m.name} is on a pod.`;
       const listKey = JSON.stringify([mine, !!pod]);
       if (loraListKeys[m.key] !== listKey) {
         loraListKeys[m.key] = listKey;

@@ -3,6 +3,7 @@
 The library (.state/loras.json) remembers each LoRA's name and download link. rp.py
 downloads a set's LoRAs onto the pod, into models/loras/<set>/, whenever that set is on
 the pod; the dashboard also downloads a newly added one straight away on a running pod.
+A LoRA switched off stays in the library but isn't downloaded.
 """
 import hashlib
 import json
@@ -72,7 +73,8 @@ def _save(items):
 def add(set_key, url, civitai_key=None, hf_token=None):
     """Look up a pasted link and remember it under a model set. Returns the new entry."""
     item = resolve(url.strip(), civitai_key, hf_token)
-    item = {"id": f"{set_key}/{item.pop('ref')}", "set": set_key, **item, "added": time.time()}
+    item = {"id": f"{set_key}/{item.pop('ref')}", "set": set_key, **item, "enabled": True,
+            "added": time.time()}
     with _lock:
         items = load()
         for other in items:
@@ -82,6 +84,22 @@ def add(set_key, url, civitai_key=None, hf_token=None):
                 raise LoraError(f"{other['name']} is already saved as {item['file']}.")
         items.append(item)
         _save(items)
+    return item
+
+
+def enabled(item):
+    """Whether a LoRA is downloaded onto pods (entries from before the switch are)."""
+    return item.get("enabled", True)
+
+
+def set_enabled(lora_id, on):
+    """Switch a LoRA's download on or off. Returns the entry, or None if it isn't in the list."""
+    with _lock:
+        items = load()
+        item = next((i for i in items if i["id"] == lora_id), None)
+        if item:
+            item["enabled"] = bool(on)
+            _save(items)
     return item
 
 

@@ -453,7 +453,7 @@ class Controller:
             if not pod:
                 return
             sets = pod.get("models", [])
-            ids = [l["id"] for l in loras.load() if l["set"] in sets
+            ids = [l["id"] for l in loras.load() if l["set"] in sets and loras.enabled(l)
                    and self.lora_status.get(l["id"], {}).get("state") in (None, "queued")]
             if not ids:
                 return
@@ -512,6 +512,18 @@ class Controller:
         with self.lock:
             self.lora_status.pop(lora_id, None)
         HUB.add_log(f"Removed LoRA {gone['name']} from the list", "info")
+        self.changed()
+
+    def toggle_lora(self, lora_id, on):
+        item = loras.set_enabled(lora_id, bool(on)) if isinstance(lora_id, str) else None
+        if not item:
+            return "That LoRA isn't in the list."
+        with self.lock:
+            # Forget a queued or failed try, so switching back on downloads it again.
+            if self.lora_status.get(lora_id, {}).get("state") in ("queued", "error"):
+                self.lora_status.pop(lora_id, None)
+        HUB.add_log(f"LoRA {item['name']} switched {'on' if on else 'off'}", "info")
+        self.kick_loras()
         self.changed()
 
     def retry_lora(self, lora_id):
@@ -730,6 +742,8 @@ class Handler(BaseHTTPRequestHandler):
             err = CTL.add_lora(body.get("set"), body.get("url"))
         elif path == "/api/loras/remove":
             err = CTL.remove_lora(body.get("id"))
+        elif path == "/api/loras/toggle":
+            err = CTL.toggle_lora(body.get("id"), body.get("enabled"))
         elif path == "/api/loras/retry":
             err = CTL.retry_lora(body.get("id"))
         elif path == "/api/dismiss":
